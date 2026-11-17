@@ -1,0 +1,66 @@
+name: build
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build exe (csc.exe from .NET Framework 4.8)
+        shell: pwsh
+        run: .\build\build.ps1
+
+      - name: Run self-tests (RX_SELFTEST=1)
+        shell: pwsh
+        run: |
+          $env:RX_SELFTEST = '1'
+          $p = Start-Process -FilePath dist\Rx工具箱.exe -WorkingDirectory dist -Wait -PassThru
+          Get-Content dist\selftest.log -Encoding UTF8
+          Remove-Item dist\selftest.log -Force -ErrorAction SilentlyContinue
+          if ($p.ExitCode -ne 0) { exit $p.ExitCode }
+
+      - name: Show artifact
+        shell: pwsh
+        run: |
+          Get-ChildItem dist | Format-Table Name, Length
+          Get-FileHash dist\*.exe -Algorithm SHA256 | Format-Table
+
+      - name: Upload unsigned artifact
+        id: upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: RXToolbox-unsigned
+          path: dist/*.exe
+          if-no-files-found: error
+
+      # ------------------------------------------------------------------
+      # 拿到 SignPath 的 organization-id / project-slug 后，把下面这段启用：
+      #
+      # - name: Submit signing request to SignPath
+      #   uses: signpath/github-action-submit-signing-request@v1
+      #   with:
+      #     api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+      #     organization-id: ${{ secrets.SIGNPATH_ORG_ID }}
+      #     project-slug: rx-tools
+      #     signing-policy-slug: release-signing
+      #     artifact-configuration-slug: exe
+      #     github-artifact-id: ${{ steps.upload.outputs.artifact-id }}
+      #     wait-for-completion: true
+      #     output-artifact-directory: signed
+      #
+      # - name: Upload signed artifact
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: RXToolbox-signed
+      #     path: signed/*.exe
+      # ------------------------------------------------------------------

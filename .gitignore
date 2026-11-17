@@ -1,0 +1,13 @@
+dist/
+*.exe
+*.zip
+*.log
+*.upd
+*.old
+*.old.*
+settings.ini
+servers.txt
+custom.txt
+selftest.log
+dump-ui.log
+__pycache__/
