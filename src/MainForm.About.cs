@@ -349,12 +349,12 @@ public partial class MainForm
 
         AddAboutText(host, "授权", x + 2, y, w - 4, fSmall, Color.FromArgb(110, 122, 140), 20);
         y += 22;
-        y = AddAboutPara(host, "完全免费，仅供学习交流使用。允许二次分发与修改（保留出处即可）；禁止商用、倒卖或以此盈利。",
+        y = AddAboutPara(host, "本程序代码按 MIT License 开源免费发布，允许自由使用、修改与再分发（需保留原作者版权及许可声明）。\n官方从未授权任何收费版本，请勿从付费或倒卖渠道购买。",
             x + 2, y, w - 14, fBody, cBody);
 
         AddAboutText(host, "开源", x + 2, y, w - 4, fSmall, Color.FromArgb(110, 122, 140), 20);
         y += 22;
-        y = AddAboutPara(host, "本程序以 MIT 许可开源：源码公开，可自行编译核对，也欢迎提问题、提改进。",
+        y = AddAboutPara(host, "源码完全公开于 GitHub，可自行编译核对，也欢迎提问题、提改进：",
             x + 2, y, w - 14, fBody, cBody);
 
         var lnkRepo = new LinkLabel();
