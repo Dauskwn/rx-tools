@@ -1,20 +1,13 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
+using System.Drawing.Text;
 using System.IO;
-using System.Net;
-using System.Net.Sockets;
-using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
-using System.Text.RegularExpressions;
-using System.Threading;
-using System.Threading.Tasks;
 using System.Windows.Forms;
-using WSize = Windows.Foundation.Size;
-using Windows.Graphics.Imaging;
-using Windows.Media.Ocr;
-using Windows.Storage.Streams;
 
 public class Overlay : Form
 {
@@ -24,10 +17,22 @@ public class Overlay : Form
 
     public Color HairColor = Color.Lime;
     public int Thickness = 2, Length = 9, Gap = 5, DotSize = 2;
+    public int OutlineWidth = 1;    // 0..2px 黑色外描边（亮/暗背景全清晰）
+    public int OpacityPct = 100;    // 20..100% 不透明度
     public int StyleIndex = 0;
-    // 自定义准星图片（导入 PNG/BMP）；路径为空表示用内置矢量样式
+    public const int OffsetMin = -20;
+    public const int OffsetMax = 20;
+    public int OffsetX = 0, OffsetY = 0;
+    // 自定义准星图片（导入 PNG/BMP，保留完整 32-bit 透明通道）；路径为空表示用内置矢量样式
     public Bitmap CustomImage;
     public string CustomImagePath = "";
+
+    public static int ClampOffset(int v)
+    {
+        return Math.Max(OffsetMin, Math.Min(OffsetMax, v));
+    }
+
+    int lastLeft = 0, lastTop = 0;
 
     public Overlay()
     {
@@ -35,10 +40,7 @@ public class Overlay : Form
         TopMost = true;
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.Manual;
-        BackColor = Color.Magenta;
-        TransparencyKey = Color.Magenta;
         Size = new Size(240, 240);
-        SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint, true);
         Visible = false;
     }
 
@@ -47,8 +49,8 @@ public class Overlay : Form
         get
         {
             var cp = base.CreateParams;
-            cp.ExStyle |= 0x20;       // WS_EX_TRANSPARENT
-            cp.ExStyle |= 0x80000;    // WS_EX_LAYERED
+            cp.ExStyle |= 0x20;       // WS_EX_TRANSPARENT（鼠标穿透）
+            cp.ExStyle |= 0x80000;    // WS_EX_LAYERED（32-bit 每像素 Alpha）
             cp.ExStyle |= 0x80;       // WS_EX_TOOLWINDOW
             cp.ExStyle |= 0x08000000; // WS_EX_NOACTIVATE
             return cp;
@@ -67,7 +69,7 @@ public class Overlay : Form
         {
             int idx = ((value % Palette.Length) + Palette.Length) % Palette.Length;
             HairColor = Palette[idx];
-            Invalidate();
+            RedrawLayered();
         }
     }
 
@@ -79,69 +81,129 @@ public class Overlay : Form
     public void CycleStyle()
     {
         StyleIndex = (StyleIndex + 1) % Styles.Length;
-        Invalidate();
+        RedrawLayered();
+    }
+
+    public new void Invalidate()
+    {
+        RedrawLayered();
+    }
+
+    public void CenterAndRedraw()
+    {
+        Rectangle scr = Native.GetTargetScreenBounds();
+        lastLeft = scr.X + (scr.Width - Width) / 2 + ClampOffset(OffsetX);
+        lastTop = scr.Y + (scr.Height - Height) / 2 + ClampOffset(OffsetY);
+        RedrawLayered();
+        if (IsHandleCreated) Native.MakeTopmost(Handle);
+    }
+
+    public void RedrawLayered()
+    {
+        if (IsDisposed || !IsHandleCreated || !Visible) return;
+        try
+        {
+            Rectangle scr = Native.GetTargetScreenBounds();
+            lastLeft = scr.X + (scr.Width - Width) / 2 + ClampOffset(OffsetX);
+            lastTop = scr.Y + (scr.Height - Height) / 2 + ClampOffset(OffsetY);
+            int w = Math.Max(32, Width);
+            int h = Math.Max(32, Height);
+            using (var bmp = new Bitmap(w, h, PixelFormat.Format32bppPArgb))
+            {
+                using (var g = Graphics.FromImage(bmp))
+                {
+                    g.Clear(Color.FromArgb(0, 0, 0, 0));
+                    DrawCrosshair(g, w / 2f, h / 2f);
+                }
+                int pct = Math.Max(20, Math.Min(100, OpacityPct));
+                byte alpha = (byte)Math.Round(pct * 255.0 / 100.0);
+                Native.PushLayeredBitmap(Handle, bmp, lastLeft, lastTop, alpha);
+            }
+        }
+        catch { }
+    }
+
+    protected override void OnVisibleChanged(EventArgs e)
+    {
+        base.OnVisibleChanged(e);
+        if (Visible)
+        {
+            if (!IsHandleCreated) CreateHandle();
+            CenterAndRedraw();
+        }
     }
 
     public void DrawCrosshair(Graphics g, float cx, float cy)
     {
-        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.None;
         float g0 = Gap, len = Length;
 
-        // 导入的图片优先：按「臂长+间隙」的两倍撑开，取最长边等比缩放，最近邻保持像素锐利
         if (CustomImage != null)
         {
-            float side = Math.Max(8f, Math.Min(300f, (Length + Gap) * 2f));
+            float side = Math.Max(8f, Math.Min(232f, (Length + Gap) * 2f));
             float sc = side / Math.Max(1, Math.Max(CustomImage.Width, CustomImage.Height));
             float iw = Math.Max(1f, CustomImage.Width * sc);
             float ih = Math.Max(1f, CustomImage.Height * sc);
             var oldInterp = g.InterpolationMode;
-            g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.NearestNeighbor;
-            g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.Half;
-            // 洋红当透明色：叠色窗口里它是透明键，预览控件里也会真透明
-            using (var attrs = new System.Drawing.Imaging.ImageAttributes())
-            {
-                attrs.SetColorKey(Color.Magenta, Color.Magenta);
-                int dx = (int)Math.Round(cx - iw / 2f), dy = (int)Math.Round(cy - ih / 2f);
-                int dw = Math.Max(1, (int)Math.Round(iw)), dh = Math.Max(1, (int)Math.Round(ih));
-                var dest = new Rectangle(dx, dy, dw, dh);
-                g.DrawImage(CustomImage, dest, 0, 0, CustomImage.Width, CustomImage.Height,
-                    GraphicsUnit.Pixel, attrs);
-            }
+            var oldOffset = g.PixelOffsetMode;
+            g.InterpolationMode = (sc >= 1.5f) ? InterpolationMode.NearestNeighbor : InterpolationMode.HighQualityBicubic;
+            g.PixelOffsetMode = PixelOffsetMode.Half;
+            int dx = (int)Math.Round(cx - iw / 2f);
+            int dy = (int)Math.Round(cy - ih / 2f);
+            int dw = Math.Max(1, (int)Math.Round(iw));
+            int dh = Math.Max(1, (int)Math.Round(ih));
+            g.DrawImage(CustomImage, new Rectangle(dx, dy, dw, dh), 0, 0, CustomImage.Width, CustomImage.Height, GraphicsUnit.Pixel);
             g.InterpolationMode = oldInterp;
+            g.PixelOffsetMode = oldOffset;
             return;
         }
 
-        // 粗线宽为奇数时偏移半像素，避免线条跨到两个像素上显得发虚/发歪
-        if (Thickness % 2 == 1) { cx += 0.5f; cy += 0.5f; }
+        float drawCx = cx, drawCy = cy;
+        if (Thickness % 2 == 1) { drawCx += 0.5f; drawCy += 0.5f; }
 
-        using (var pen = new Pen(HairColor, Thickness))
-        using (var brush = new SolidBrush(HairColor))
+        int ow = Math.Max(0, Math.Min(2, OutlineWidth));
+        if (ow > 0)
+        {
+            DrawVectorPass(g, drawCx, drawCy, g0, len, Color.FromArgb(205, 10, 14, 20), Thickness + ow * 2, ow);
+        }
+        DrawVectorPass(g, drawCx, drawCy, g0, len, HairColor, Thickness, 0);
+    }
+
+    void DrawVectorPass(Graphics g, float cx, float cy, float g0, float len, Color col, float penW, float pad)
+    {
+        var oldSm = g.SmoothingMode;
+        bool useAA = (StyleIndex == 2 || StyleIndex == 3 || StyleIndex == 4);
+        g.SmoothingMode = useAA ? SmoothingMode.AntiAlias : SmoothingMode.None;
+
+        using (var pen = new Pen(col, penW))
+        using (var brush = new SolidBrush(col))
         {
             switch (StyleIndex)
             {
                 case 0:
-                    g.DrawLine(pen, cx - g0 - len, cy, cx - g0, cy);
-                    g.DrawLine(pen, cx + g0, cy, cx + g0 + len, cy);
-                    g.DrawLine(pen, cx, cy - g0 - len, cx, cy - g0);
-                    g.DrawLine(pen, cx, cy + g0, cx, cy + g0 + len);
+                    g.DrawLine(pen, cx - g0 - len - pad, cy, cx - g0 + pad, cy);
+                    g.DrawLine(pen, cx + g0 - pad, cy, cx + g0 + len + pad, cy);
+                    g.DrawLine(pen, cx, cy - g0 - len - pad, cx, cy - g0 + pad);
+                    g.DrawLine(pen, cx, cy + g0 - pad, cx, cy + g0 + len + pad);
                     if (DotSize > 0)
-                        g.FillEllipse(brush, cx - DotSize / 2f, cy - DotSize / 2f, DotSize, DotSize);
+                    {
+                        float d = DotSize + pad * 2f;
+                        g.SmoothingMode = SmoothingMode.AntiAlias;
+                        g.FillEllipse(brush, cx - d / 2f, cy - d / 2f, d, d);
+                    }
                     break;
                 case 1:
-                    g.DrawLine(pen, cx - g0 - len, cy, cx + g0 + len, cy);
-                    g.DrawLine(pen, cx, cy - g0 - len, cx, cy + g0 + len);
+                    g.DrawLine(pen, cx - g0 - len - pad, cy, cx + g0 + len + pad, cy);
+                    g.DrawLine(pen, cx, cy - g0 - len - pad, cx, cy + g0 + len + pad);
                     break;
                 case 2:
-                    float r = Math.Max(2.5f, (DotSize > 0 ? DotSize : Thickness) * 1.6f);
-                    g.FillEllipse(brush, cx - r, cy - r, r * 2, r * 2);
+                {
+                    float r = Math.Max(2.5f, (DotSize > 0 ? DotSize : Thickness) * 1.6f) + pad;
+                    g.FillEllipse(brush, cx - r, cy - r, r * 2f, r * 2f);
                     break;
+                }
                 case 3:
                 {
-                    // V 形：三点折线（左臂→顶点→右臂），偏移取整保证左右完全对称，
-                    // 用 Miter 连接让顶点是一个干净的尖角（两条线分开画会留缺口）
                     float s = len + g0;
-                    // 比十字样式收一档，别的样式半径是 len+gap，V 只取一半多一点，
-                    // 否则同参数下它比别的准星大一圈
                     float half = (float)Math.Round(s * 0.45f);
                     float top = (float)Math.Round(s * 0.27f);
                     float bot = (float)Math.Round(s * 0.45f);
@@ -155,44 +217,55 @@ public class Overlay : Form
                         new PointF(cx,        cy + bot),
                         new PointF(cx + half, cy - top)
                     };
-                    var oldJoin = pen.LineJoin;
-                    var oldStart = pen.StartCap;
-                    var oldEnd = pen.EndCap;
-                    pen.LineJoin = System.Drawing.Drawing2D.LineJoin.Miter;
-                    pen.StartCap = System.Drawing.Drawing2D.LineCap.Flat;
-                    pen.EndCap = System.Drawing.Drawing2D.LineCap.Flat;
+                    pen.LineJoin = LineJoin.Miter;
+                    pen.StartCap = pad > 0 ? LineCap.Square : LineCap.Flat;
+                    pen.EndCap = pad > 0 ? LineCap.Square : LineCap.Flat;
                     g.DrawLines(pen, pts);
-                    pen.LineJoin = oldJoin;
-                    pen.StartCap = oldStart;
-                    pen.EndCap = oldEnd;
                     if (DotSize > 0)
-                        g.FillEllipse(brush, cx - DotSize / 2f, cy - DotSize / 2f, DotSize, DotSize);
+                    {
+                        float d = DotSize + pad * 2f;
+                        g.FillEllipse(brush, cx - d / 2f, cy - d / 2f, d, d);
+                    }
                     break;
                 }
                 case 4:
+                {
                     float rOut = len + g0;
                     float rIn = Math.Max(3.5f, rOut * 0.45f);
-                    using (var thinPen = new Pen(HairColor, Math.Max(1f, Thickness * 0.6f)))
+                    float tw = Math.Max(1f, Thickness * 0.6f) + pad * 2f;
+                    using (var thinPen = new Pen(col, tw))
                     {
-                        g.DrawEllipse(thinPen, cx - rOut, cy - rOut, rOut * 2, rOut * 2);
-                        g.DrawEllipse(thinPen, cx - rIn, cy - rIn, rIn * 2, rIn * 2);
+                        g.DrawEllipse(thinPen, cx - rOut, cy - rOut, rOut * 2f, rOut * 2f);
+                        g.DrawEllipse(thinPen, cx - rIn, cy - rIn, rIn * 2f, rIn * 2f);
                     }
                     if (DotSize > 0)
-                        g.FillEllipse(brush, cx - DotSize / 2f, cy - DotSize / 2f, DotSize, DotSize);
+                    {
+                        float d = DotSize + pad * 2f;
+                        g.FillEllipse(brush, cx - d / 2f, cy - d / 2f, d, d);
+                    }
                     break;
+                }
                 case 5:
-                    g.DrawLine(pen, cx - g0 - len, cy, cx - g0, cy);
-                    g.DrawLine(pen, cx + g0, cy, cx + g0 + len, cy);
-                    g.DrawLine(pen, cx, cy + g0, cx, cy + g0 + len);
+                    g.DrawLine(pen, cx - g0 - len - pad, cy, cx - g0 + pad, cy);
+                    g.DrawLine(pen, cx + g0 - pad, cy, cx + g0 + len + pad, cy);
+                    g.DrawLine(pen, cx, cy + g0 - pad, cx, cy + g0 + len + pad);
                     if (DotSize > 0)
-                        g.FillEllipse(brush, cx - DotSize / 2f, cy - DotSize / 2f, DotSize, DotSize);
+                    {
+                        float d = DotSize + pad * 2f;
+                        g.SmoothingMode = SmoothingMode.AntiAlias;
+                        g.FillEllipse(brush, cx - d / 2f, cy - d / 2f, d, d);
+                    }
                     break;
             }
         }
+        g.SmoothingMode = oldSm;
     }
 
-    // 把导入的图片处理成"透明键安全"的位图：alpha>=128 视为实心，其余涂成透明色洋红。
-    // 叠色窗口（TransparencyKey）只认精确的洋红，半透明像素会混出色边，所以先做二值化。
+    /// <summary>
+    /// 准备 32-bit 每像素透明准星位图：
+    /// - 带透明通道的 PNG：完整保留原有 8-bit Alpha 渐变与柔和光晕；
+    /// - 无透明通道的 JPG/BMP：LockBits 极速将接近左上角底色的像素柔化扣透明。
+    /// </summary>
     public static Bitmap PrepareCrosshairImage(string path)
     {
         Bitmap src = null;
@@ -200,53 +273,66 @@ public class Overlay : Form
         try
         {
             src = new Bitmap(path);
-            if (src.Width > 256 || src.Height > 256)
+            int nw = src.Width, nh = src.Height;
+            if (nw > 256 || nh > 256)
             {
-                float scale = 256f / Math.Max(src.Width, src.Height);
-                int nw = Math.Max(1, (int)Math.Round(src.Width * scale));
-                int nh = Math.Max(1, (int)Math.Round(src.Height * scale));
-                work = new Bitmap(nw, nh, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
-                using (var g = Graphics.FromImage(work))
-                {
-                    g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
-                    g.DrawImage(src, 0, 0, nw, nh);
-                }
-                src.Dispose();
-                src = null;
+                float scale = 256f / Math.Max(nw, nh);
+                nw = Math.Max(1, (int)Math.Round(nw * scale));
+                nh = Math.Max(1, (int)Math.Round(nh * scale));
             }
-            else
+            work = new Bitmap(nw, nh, PixelFormat.Format32bppArgb);
+            using (var g = Graphics.FromImage(work))
             {
-                work = src;
-                src = null;
+                g.Clear(Color.FromArgb(0, 0, 0, 0));
+                g.InterpolationMode = InterpolationMode.HighQualityBicubic;
+                g.DrawImage(src, 0, 0, nw, nh);
             }
+            src.Dispose();
+            src = null;
 
-            // 先看有没有透明通道；全不透明的图（JPG/不透明 PNG）就拿左上角颜色当底色扣掉
-            bool hasAlpha = false;
-            Color key = Color.Empty;
-            Color corner = work.GetPixel(0, 0);
-            for (int y = 0; y < work.Height && !hasAlpha; y++)
-                for (int x = 0; x < work.Width; x++)
-                    if (work.GetPixel(x, y).A < 250) { hasAlpha = true; break; }
-            if (!hasAlpha) key = corner;
-
-            var outBmp = new Bitmap(work.Width, work.Height, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
-            for (int y = 0; y < work.Height; y++)
+            var rect = new Rectangle(0, 0, nw, nh);
+            BitmapData bd = work.LockBits(rect, ImageLockMode.ReadWrite, PixelFormat.Format32bppArgb);
+            try
             {
-                for (int x = 0; x < work.Width; x++)
+                int byteCount = Math.Abs(bd.Stride) * nh;
+                byte[] buf = new byte[byteCount];
+                Marshal.Copy(bd.Scan0, buf, 0, byteCount);
+
+                bool hasAlpha = false;
+                for (int y = 0; y < nh && !hasAlpha; y++)
                 {
-                    Color c = work.GetPixel(x, y);
-                    bool transparent;
-                    if (hasAlpha) transparent = c.A < 128;
-                    else
+                    int row = y * bd.Stride;
+                    for (int x = 0; x < nw; x++)
                     {
-                        int d = Math.Abs(c.R - key.R) + Math.Abs(c.G - key.G) + Math.Abs(c.B - key.B);
-                        transparent = d < 40;      // 和底色足够接近就算背景
+                        if (buf[row + x * 4 + 3] < 250) { hasAlpha = true; break; }
                     }
-                    if (transparent) outBmp.SetPixel(x, y, Color.Magenta);
-                    else outBmp.SetPixel(x, y, Color.FromArgb(255, c.R, c.G, c.B));
+                }
+
+                if (!hasAlpha && byteCount >= 4)
+                {
+                    byte kb = buf[0], kg = buf[1], kr = buf[2];
+                    for (int y = 0; y < nh; y++)
+                    {
+                        int row = y * bd.Stride;
+                        for (int x = 0; x < nw; x++)
+                        {
+                            int idx = row + x * 4;
+                            int d = Math.Abs(buf[idx] - kb) + Math.Abs(buf[idx + 1] - kg) + Math.Abs(buf[idx + 2] - kr);
+                            if (d < 36) buf[idx + 3] = 0;
+                            else if (d < 64) buf[idx + 3] = (byte)((d - 36) * 255 / 28);
+                        }
+                    }
+                    Marshal.Copy(buf, 0, bd.Scan0, byteCount);
                 }
             }
-            return outBmp;
+            finally
+            {
+                work.UnlockBits(bd);
+            }
+
+            Bitmap ret = work;
+            work = null;
+            return ret;
         }
         catch { return null; }
         finally
@@ -256,9 +342,17 @@ public class Overlay : Form
         }
     }
 
-    protected override void OnPaint(PaintEventArgs e)
+    protected override void Dispose(bool disposing)
     {
-        DrawCrosshair(e.Graphics, Width / 2f, Height / 2f);
+        if (disposing)
+        {
+            if (CustomImage != null)
+            {
+                try { CustomImage.Dispose(); } catch { }
+                CustomImage = null;
+            }
+        }
+        base.Dispose(disposing);
     }
 }
 
@@ -269,7 +363,7 @@ public class TimerChainNode
     public int EndSec = 0;
     public int DurationSec = 5;
     public int ColorIdx = -1;     // -1=不变, 0..6 对应 CountdownOverlay.TimerPalette
-    public int FlashMode = 0;     // 0=不闪烁, 1=低频, 2=高频
+    public int FlashMode = 0;     // 0=不闪烁, 1=低频, 2=中频, 3=高频
     public string LabelText = "";
 
     public TimerChainNode Clone()
@@ -421,6 +515,26 @@ public class TimerChainPreset
         }
     }
 
+    /// <summary>查找剩余时间小于 remSec、即将触发的下一条带文字标注的事件。</summary>
+    public static TimerChainNode FindNextUpcomingNode(List<TimerChainNode> nodes, int remSec)
+    {
+        if (nodes == null || nodes.Count == 0) return null;
+        TimerChainNode best = null;
+        int bestStart = -1;
+        for (int i = 0; i < nodes.Count; i++)
+        {
+            TimerChainNode n = nodes[i];
+            if (n == null || string.IsNullOrEmpty(n.LabelText)) continue;
+            int st = n.EffectiveStartSec();
+            if (st < remSec && st > bestStart)
+            {
+                bestStart = st;
+                best = n;
+            }
+        }
+        return best;
+    }
+
     static string ToB64(string s)
     {
         return Convert.ToBase64String(Encoding.UTF8.GetBytes(s ?? ""));
@@ -529,8 +643,11 @@ public class CountdownOverlay : Form
     public int AnchorIndex = 1;
     public int OffsetX = 0;
     public int OffsetY = 24;
+    public int TotalSeconds = 1080;
     public int RemainingSeconds = 1080;
     public bool FlashDim = false;
+    public float PulseAlpha = 1.0f;       // 0.28..1.0 平滑正弦脉冲
+    public bool UseCardStyle = false;     // true=半透明深色圆角胶囊+进度条，false=高清纯数字
     public string ActiveLabel = "";
 
     Font cachedFont;
@@ -538,6 +655,7 @@ public class CountdownOverlay : Form
     Font cachedLabelFont;
     int cachedLabelFontSize = -1;
     int cachedDigitH = 40;
+    int lastW = 160, lastH = 64, lastX = 0, lastY = 24;
 
     public CountdownOverlay()
     {
@@ -545,10 +663,7 @@ public class CountdownOverlay : Form
         TopMost = true;
         ShowInTaskbar = false;
         StartPosition = FormStartPosition.Manual;
-        BackColor = Color.Magenta;
-        TransparencyKey = Color.Magenta;
         Size = new Size(160, 64);
-        SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint, true);
         Visible = false;
     }
 
@@ -558,7 +673,7 @@ public class CountdownOverlay : Form
         {
             var cp = base.CreateParams;
             cp.ExStyle |= 0x20;       // WS_EX_TRANSPARENT (鼠标穿透)
-            cp.ExStyle |= 0x80000;    // WS_EX_LAYERED
+            cp.ExStyle |= 0x80000;    // WS_EX_LAYERED (32bpp 每像素 Alpha)
             cp.ExStyle |= 0x80;       // WS_EX_TOOLWINDOW
             cp.ExStyle |= 0x08000000; // WS_EX_NOACTIVATE
             return cp;
@@ -575,9 +690,7 @@ public class CountdownOverlay : Form
 
     Font EnsureFont()
     {
-        int sz = FontSize;
-        if (sz < 12) sz = 12;
-        if (sz > 72) sz = 72;
+        int sz = Math.Max(12, Math.Min(72, FontSize));
         if (cachedFont == null || cachedFontSize != sz)
         {
             if (cachedFont != null) { try { cachedFont.Dispose(); } catch { } }
@@ -589,7 +702,7 @@ public class CountdownOverlay : Form
 
     Font EnsureLabelFont()
     {
-        int lsz = Math.Max(11, (int)Math.Round(FontSize * 0.56));
+        int lsz = Math.Max(11, (int)Math.Round(FontSize * 0.52));
         if (cachedLabelFont == null || cachedLabelFontSize != lsz)
         {
             if (cachedLabelFont != null) { try { cachedLabelFont.Dispose(); } catch { } }
@@ -599,73 +712,86 @@ public class CountdownOverlay : Form
         return cachedLabelFont;
     }
 
+    public new void Invalidate()
+    {
+        RedrawLayered();
+    }
+
+    protected override void OnVisibleChanged(EventArgs e)
+    {
+        base.OnVisibleChanged(e);
+        if (Visible)
+        {
+            if (!IsHandleCreated) CreateHandle();
+            ApplyBoundsAndTopmost();
+            RedrawLayered();
+        }
+    }
+
+    void ComputeGeometry()
+    {
+        Font f = EnsureFont();
+        string curText = FormatMmSs(RemainingSeconds);
+        string sample = curText.Length > 5 ? "888:88" : "88:88";
+        Size szD = TextRenderer.MeasureText(sample, f, new Size(2000, 1000), TextFormatFlags.NoPadding);
+        int padX = UseCardStyle ? 20 : 12;
+        int padTop = UseCardStyle ? 8 : 4;
+        int padBot = UseCardStyle ? 12 : 6;
+        int digitW = Math.Max(92, szD.Width + padX * 2);
+        int digitH = Math.Max(34, szD.Height + 4);
+        cachedDigitH = digitH;
+
+        int w = digitW;
+        int h = padTop + digitH + padBot;
+        if (!string.IsNullOrEmpty(ActiveLabel))
+        {
+            Font lf = EnsureLabelFont();
+            Size szL = TextRenderer.MeasureText(ActiveLabel, lf, new Size(2000, 1000), TextFormatFlags.NoPadding);
+            w = Math.Max(w, szL.Width + padX * 2 + 8);
+            h = padTop + digitH + szL.Height + padBot + 4;
+        }
+
+        lastW = w;
+        lastH = h;
+
+        Rectangle scr = Native.GetTargetScreenBounds();
+        int sw = scr.Width;
+        int sh = scr.Height;
+        int margin = 20;
+        int bx, by;
+        switch (AnchorIndex)
+        {
+            case 0: bx = scr.X + margin; by = scr.Y + margin; break;
+            case 2: bx = scr.X + sw - w - margin; by = scr.Y + margin; break;
+            case 3: bx = scr.X + margin; by = scr.Y + sh - h - margin; break;
+            case 4: bx = scr.X + sw - w - margin; by = scr.Y + sh - h - margin; break;
+            case 5: bx = scr.X + (sw - w) / 2; by = scr.Y + sh / 2 + 24; break;
+            default: bx = scr.X + (sw - w) / 2; by = scr.Y + margin; break;
+        }
+        lastX = bx + OffsetX;
+        lastY = by + OffsetY;
+    }
+
     public void ApplyBoundsAndTopmost()
     {
         try
         {
-            Font f = EnsureFont();
-            string curText = FormatMmSs(RemainingSeconds);
-            string sample = curText.Length > 5 ? "888:88" : "88:88";
-            Size szD = TextRenderer.MeasureText(sample, f, new Size(2000, 1000), TextFormatFlags.NoPadding);
-            int digitW = Math.Max(80, szD.Width + 16);
-            int digitH = Math.Max(34, szD.Height + 6);
-            cachedDigitH = digitH;
-
-            int w = digitW;
-            int h = digitH + 8;
-            if (!string.IsNullOrEmpty(ActiveLabel))
-            {
-                Font lf = EnsureLabelFont();
-                Size szL = TextRenderer.MeasureText(ActiveLabel, lf, new Size(2000, 1000), TextFormatFlags.NoPadding);
-                w = Math.Max(w, szL.Width + 20);
-                h = digitH + szL.Height + 12;
-            }
-
-            if (ClientSize.Width != w || ClientSize.Height != h)
-                ClientSize = new Size(w, h);
-
-            int sw = Native.GetSystemMetrics(0);
-            int sh = Native.GetSystemMetrics(1);
-            int margin = 20;
-            int bx, by;
-            switch (AnchorIndex)
-            {
-                case 0: // 左上角
-                    bx = margin;
-                    by = margin;
-                    break;
-                case 2: // 右上角
-                    bx = sw - w - margin;
-                    by = margin;
-                    break;
-                case 3: // 左下角
-                    bx = margin;
-                    by = sh - h - margin;
-                    break;
-                case 4: // 右下角
-                    bx = sw - w - margin;
-                    by = sh - h - margin;
-                    break;
-                case 5: // 屏幕居中(准星下)
-                    bx = (sw - w) / 2;
-                    by = sh / 2 + 24;
-                    break;
-                default: // 1: 顶部居中
-                    bx = (sw - w) / 2;
-                    by = margin;
-                    break;
-            }
-            int x = bx + OffsetX;
-            int y = by + OffsetY;
+            ComputeGeometry();
             if (IsHandleCreated)
-                Native.SetWindowPos(Handle, new IntPtr(-1), x, y, w, h, 0x0010);
+            {
+                if (Visible) RedrawLayered();
+                Native.MakeTopmost(Handle);
+            }
             else
-                Location = new Point(x, y);
+            {
+                Size = new Size(lastW, lastH);
+                Location = new Point(lastX, lastY);
+            }
         }
         catch { }
     }
 
-    static void DrawOutlinedText(Graphics g, string text, Font f, Color fg, Color outline, RectangleF rc, StringFormat sf)
+    static void DrawSmoothOutlinedText(Graphics g, string text, Font f, Color fg, Color outline, RectangleF rc, StringFormat sf)
     {
         using (var ob = new SolidBrush(outline))
         {
@@ -675,48 +801,86 @@ public class CountdownOverlay : Form
                 g.DrawString(text, f, ob, new RectangleF(rc.X + dx[i], rc.Y + dy[i], rc.Width, rc.Height), sf);
         }
         using (var fb = new SolidBrush(fg))
-        {
             g.DrawString(text, f, fb, rc, sf);
-        }
     }
 
-    protected override void OnPaint(PaintEventArgs e)
+    public void RedrawLayered()
     {
-        Graphics g = e.Graphics;
-        g.Clear(Color.Magenta);
-        // SingleBitPerPixelGridFit 避免边缘抗锯齿像素与洋红背景混合产生紫边
-        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.SingleBitPerPixelGridFit;
-
-        string text = FormatMmSs(RemainingSeconds);
-        Font f = EnsureFont();
-        int cidx = ((ActiveColorIndex % TimerPalette.Length) + TimerPalette.Length) % TimerPalette.Length;
-        Color baseFg = TimerPalette[cidx];
-        Color digitFg = FlashDim
-            ? Color.FromArgb(Math.Max(26, baseFg.R / 4), Math.Max(26, baseFg.G / 4), Math.Max(26, baseFg.B / 4))
-            : baseFg;
-        Color outline = Color.FromArgb(18, 22, 28);
-
-        using (var sf = new StringFormat())
+        if (IsDisposed || !IsHandleCreated || !Visible) return;
+        try
         {
-            sf.Alignment = StringAlignment.Center;
-            sf.LineAlignment = StringAlignment.Center;
-            sf.FormatFlags = StringFormatFlags.NoWrap;
-
-            if (string.IsNullOrEmpty(ActiveLabel))
+            ComputeGeometry();
+            int w = Math.Max(64, lastW);
+            int h = Math.Max(32, lastH);
+            using (var bmp = new Bitmap(w, h, PixelFormat.Format32bppPArgb))
             {
-                DrawOutlinedText(g, text, f, digitFg, outline, new RectangleF(0, 0, Width, Height), sf);
-            }
-            else
-            {
-                RectangleF rcDigit = new RectangleF(0, 2, Width, cachedDigitH);
-                DrawOutlinedText(g, text, f, digitFg, outline, rcDigit, sf);
+                using (var g = Graphics.FromImage(bmp))
+                {
+                    g.Clear(Color.FromArgb(0, 0, 0, 0));
+                    g.SmoothingMode = SmoothingMode.AntiAlias;
+                    g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
 
-                Font lf = EnsureLabelFont();
-                float ly = 2 + cachedDigitH;
-                RectangleF rcLabel = new RectangleF(0, ly, Width, Math.Max(16, Height - ly - 2));
-                DrawOutlinedText(g, ActiveLabel, lf, baseFg, outline, rcLabel, sf);
+                    int cidx = ((ActiveColorIndex % TimerPalette.Length) + TimerPalette.Length) % TimerPalette.Length;
+                    Color baseFg = TimerPalette[cidx];
+                    float mul = Math.Max(0.25f, Math.Min(1.0f, PulseAlpha));
+                    if (FlashDim && mul > 0.99f) mul = 0.35f;
+                    int dAlpha = (int)Math.Round(255f * mul);
+                    Color digitFg = Color.FromArgb(dAlpha, baseFg.R, baseFg.G, baseFg.B);
+
+                    if (UseCardStyle)
+                    {
+                        var cardRect = new Rectangle(1, 1, w - 3, h - 3);
+                        using (var bg = new SolidBrush(Color.FromArgb(182, 13, 18, 28)))
+                            Native.FillRoundedRect(g, bg, cardRect, 11);
+                        using (var border = new Pen(Color.FromArgb(108, baseFg.R, baseFg.G, baseFg.B), 1.2f))
+                            Native.DrawRoundedRect(g, border, cardRect, 11);
+
+                        // 底部极细实时进度条
+                        int barPad = 12;
+                        int barW = Math.Max(12, w - barPad * 2);
+                        int barY = h - 7;
+                        using (var track = new SolidBrush(Color.FromArgb(55, 255, 255, 255)))
+                            Native.FillRoundedRect(g, track, new Rectangle(barPad, barY, barW, 3), 2);
+                        if (TotalSeconds > 0)
+                        {
+                            float frac = Math.Max(0f, Math.Min(1f, (float)RemainingSeconds / TotalSeconds));
+                            int fillW = (int)Math.Round(barW * frac);
+                            if (fillW > 2)
+                            {
+                                using (var fill = new SolidBrush(Color.FromArgb(225, baseFg.R, baseFg.G, baseFg.B)))
+                                    Native.FillRoundedRect(g, fill, new Rectangle(barPad, barY, fillW, 3), 2);
+                            }
+                        }
+                    }
+
+                    string text = FormatMmSs(RemainingSeconds);
+                    Font f = EnsureFont();
+                    Color outline = UseCardStyle ? Color.FromArgb(160, 0, 0, 0) : Color.FromArgb(220, 12, 16, 22);
+                    int padTop = UseCardStyle ? 6 : 2;
+
+                    using (var sf = new StringFormat())
+                    {
+                        sf.Alignment = StringAlignment.Center;
+                        sf.LineAlignment = StringAlignment.Center;
+                        sf.FormatFlags = StringFormatFlags.NoWrap;
+
+                        if (!string.IsNullOrEmpty(ActiveLabel))
+                        {
+                            DrawSmoothOutlinedText(g, text, f, digitFg, outline, new RectangleF(0, padTop, w, cachedDigitH), sf);
+                            Font lf = EnsureLabelFont();
+                            float ly = padTop + cachedDigitH;
+                            DrawSmoothOutlinedText(g, ActiveLabel, lf, baseFg, outline, new RectangleF(4, ly, w - 8, Math.Max(16, h - ly - (UseCardStyle ? 10 : 2))), sf);
+                        }
+                        else
+                        {
+                            DrawSmoothOutlinedText(g, text, f, digitFg, outline, new RectangleF(0, padTop, w, h - padTop - (UseCardStyle ? 8 : 2)), sf);
+                        }
+                    }
+                }
+                Native.PushLayeredBitmap(Handle, bmp, lastX, lastY, 255);
             }
         }
+        catch { }
     }
 
     protected override void Dispose(bool disposing)
@@ -727,5 +891,294 @@ public class CountdownOverlay : Form
             if (cachedLabelFont != null) { try { cachedLabelFont.Dispose(); } catch { } cachedLabelFont = null; }
         }
         base.Dispose(disposing);
+    }
+}
+
+public class CrosshairPreset
+{
+    public string Name = "新方案";
+    public int StyleIndex = 0;
+    public int ColorIndex = 0;
+    public int Thickness = 2;
+    public int Length = 9;
+    public int Gap = 5;
+    public int DotSize = 2;
+    public int OutlineWidth = 1;
+    public int OpacityPct = 100;
+    public int OffsetX = 0;
+    public int OffsetY = 0;
+    public string CustomImagePath = "";
+
+    public CrosshairPreset Clone()
+    {
+        var p = new CrosshairPreset();
+        p.Name = Name;
+        p.StyleIndex = StyleIndex;
+        p.ColorIndex = ColorIndex;
+        p.Thickness = Thickness;
+        p.Length = Length;
+        p.Gap = Gap;
+        p.DotSize = DotSize;
+        p.OutlineWidth = OutlineWidth;
+        p.OpacityPct = OpacityPct;
+        p.OffsetX = OffsetX;
+        p.OffsetY = OffsetY;
+        p.CustomImagePath = CustomImagePath ?? "";
+        return p;
+    }
+
+    public void ClampFields()
+    {
+        Name = string.IsNullOrEmpty(Name) ? "新方案" : Name.Trim();
+        if (Name.Length == 0) Name = "新方案";
+        StyleIndex = Math.Max(0, Math.Min(Overlay.Styles.Length - 1, StyleIndex));
+        ColorIndex = Math.Max(0, Math.Min(Overlay.Palette.Length - 1, ColorIndex));
+        Thickness = Math.Max(1, Math.Min(6, Thickness));
+        Length = Math.Max(3, Math.Min(40, Length));
+        Gap = Math.Max(0, Math.Min(30, Gap));
+        DotSize = Math.Max(0, Math.Min(8, DotSize));
+        OutlineWidth = Math.Max(0, Math.Min(2, OutlineWidth));
+        OpacityPct = Math.Max(20, Math.Min(100, OpacityPct));
+        OffsetX = Overlay.ClampOffset(OffsetX);
+        OffsetY = Overlay.ClampOffset(OffsetY);
+        if (CustomImagePath == null) CustomImagePath = "";
+    }
+
+    public static CrosshairPreset FromOverlay(string name, Overlay o)
+    {
+        var p = new CrosshairPreset();
+        p.Name = string.IsNullOrEmpty(name) ? "新方案" : name.Trim();
+        if (o != null)
+        {
+            p.StyleIndex = o.StyleIndex;
+            p.ColorIndex = o.ColorIndex;
+            p.Thickness = o.Thickness;
+            p.Length = o.Length;
+            p.Gap = o.Gap;
+            p.DotSize = o.DotSize;
+            p.OutlineWidth = o.OutlineWidth;
+            p.OpacityPct = o.OpacityPct;
+            p.OffsetX = o.OffsetX;
+            p.OffsetY = o.OffsetY;
+            p.CustomImagePath = o.CustomImagePath ?? "";
+        }
+        p.ClampFields();
+        return p;
+    }
+
+    public void ApplyScalarToOverlay(Overlay o)
+    {
+        if (o == null) return;
+        ClampFields();
+        o.StyleIndex = StyleIndex;
+        o.ColorIndex = ColorIndex;
+        o.Thickness = Thickness;
+        o.Length = Length;
+        o.Gap = Gap;
+        o.DotSize = DotSize;
+        o.OutlineWidth = OutlineWidth;
+        o.OpacityPct = OpacityPct;
+        o.OffsetX = OffsetX;
+        o.OffsetY = OffsetY;
+    }
+
+    public bool MatchesOverlay(Overlay o)
+    {
+        if (o == null) return false;
+        ClampFields();
+        return StyleIndex == o.StyleIndex
+            && ColorIndex == o.ColorIndex
+            && Thickness == o.Thickness
+            && Length == o.Length
+            && Gap == o.Gap
+            && DotSize == o.DotSize
+            && OutlineWidth == o.OutlineWidth
+            && OpacityPct == o.OpacityPct
+            && OffsetX == Overlay.ClampOffset(o.OffsetX)
+            && OffsetY == Overlay.ClampOffset(o.OffsetY)
+            && string.Equals(CustomImagePath ?? "", o.CustomImagePath ?? "", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public string DescribeSummary()
+    {
+        ClampFields();
+        string baseDesc = string.IsNullOrEmpty(CustomImagePath)
+            ? (Overlay.Styles[StyleIndex] + " · " + Overlay.ColorNames[ColorIndex] + " · " + OpacityPct + "%")
+            : ("自定义图片(" + Path.GetFileName(CustomImagePath) + ") · " + OpacityPct + "%");
+        if (OffsetX != 0 || OffsetY != 0)
+            baseDesc += " · 偏移(" + (OffsetX >= 0 ? "+" : "") + OffsetX + "," + (OffsetY >= 0 ? "+" : "") + OffsetY + ")";
+        return Name + "：" + baseDesc;
+    }
+
+    public static List<CrosshairPreset> CreateDefaultPresets()
+    {
+        var list = new List<CrosshairPreset>();
+        list.Add(new CrosshairPreset
+        {
+            Name = "步枪十字", StyleIndex = 0, ColorIndex = 0, Thickness = 2, Length = 9, Gap = 5, DotSize = 2, OutlineWidth = 1, OpacityPct = 100
+        });
+        list.Add(new CrosshairPreset
+        {
+            Name = "精准圆点", StyleIndex = 2, ColorIndex = 1, Thickness = 2, Length = 6, Gap = 3, DotSize = 2, OutlineWidth = 1, OpacityPct = 100
+        });
+        list.Add(new CrosshairPreset
+        {
+            Name = "散弹同心", StyleIndex = 4, ColorIndex = 4, Thickness = 2, Length = 12, Gap = 6, DotSize = 2, OutlineWidth = 1, OpacityPct = 90
+        });
+        list.Add(new CrosshairPreset
+        {
+            Name = "经典白十", StyleIndex = 1, ColorIndex = 5, Thickness = 1, Length = 10, Gap = 0, DotSize = 0, OutlineWidth = 1, OpacityPct = 95
+        });
+        return list;
+    }
+
+    public static string SerializePresets(List<CrosshairPreset> list)
+    {
+        if (list == null || list.Count == 0) return "";
+        var sb = new StringBuilder();
+        int cap = Math.Min(6, list.Count);
+        for (int i = 0; i < cap; i++)
+        {
+            CrosshairPreset p = list[i];
+            if (p == null) continue;
+            p.ClampFields();
+            if (sb.Length > 0) sb.Append(';');
+            sb.Append(Uri.EscapeDataString(p.Name)).Append(',')
+              .Append(p.StyleIndex).Append(',')
+              .Append(p.ColorIndex).Append(',')
+              .Append(p.Thickness).Append(',')
+              .Append(p.Length).Append(',')
+              .Append(p.Gap).Append(',')
+              .Append(p.DotSize).Append(',')
+              .Append(p.OutlineWidth).Append(',')
+              .Append(p.OpacityPct).Append(',')
+              .Append(p.OffsetX).Append(',')
+              .Append(p.OffsetY).Append(',')
+              .Append(Uri.EscapeDataString(p.CustomImagePath ?? ""));
+        }
+        return sb.ToString();
+    }
+
+    public static List<CrosshairPreset> DeserializePresets(string raw)
+    {
+        var list = new List<CrosshairPreset>();
+        if (!string.IsNullOrEmpty(raw))
+        {
+            string[] items = raw.Split(';');
+            for (int i = 0; i < items.Length && list.Count < 6; i++)
+            {
+                string one = (items[i] ?? "").Trim();
+                if (one.Length == 0) continue;
+                string[] parts = one.Split(',');
+                if (parts.Length < 11) continue;
+                try
+                {
+                    int st, col, th, ln, gp, dt, ow, op, ox, oy;
+                    if (!int.TryParse(parts[1], out st) || !int.TryParse(parts[2], out col)
+                        || !int.TryParse(parts[3], out th) || !int.TryParse(parts[4], out ln)
+                        || !int.TryParse(parts[5], out gp) || !int.TryParse(parts[6], out dt)
+                        || !int.TryParse(parts[7], out ow) || !int.TryParse(parts[8], out op)
+                        || !int.TryParse(parts[9], out ox) || !int.TryParse(parts[10], out oy))
+                        continue;
+
+                    var p = new CrosshairPreset();
+                    p.Name = Uri.UnescapeDataString(parts[0]);
+                    p.StyleIndex = st;
+                    p.ColorIndex = col;
+                    p.Thickness = th;
+                    p.Length = ln;
+                    p.Gap = gp;
+                    p.DotSize = dt;
+                    p.OutlineWidth = ow;
+                    p.OpacityPct = op;
+                    p.OffsetX = ox;
+                    p.OffsetY = oy;
+                    p.CustomImagePath = parts.Length >= 12 ? Uri.UnescapeDataString(parts[11]) : "";
+                    p.ClampFields();
+                    list.Add(p);
+                }
+                catch { }
+            }
+        }
+        if (list.Count == 0) return CreateDefaultPresets();
+        return list;
+    }
+
+    public static void DrawMiniIcon(Graphics g, CrosshairPreset p, Rectangle box)
+    {
+        if (g == null || p == null || box.Width < 8 || box.Height < 8) return;
+        SmoothingMode oldSm = g.SmoothingMode;
+        g.SmoothingMode = SmoothingMode.AntiAlias;
+
+        using (var wellBg = new SolidBrush(Color.FromArgb(20, 26, 36)))
+            Native.FillRoundedRect(g, wellBg, box, 4);
+        using (var wellEdge = new Pen(Color.FromArgb(52, 62, 76), 1f))
+            Native.DrawRoundedRect(g, wellEdge, new Rectangle(box.X, box.Y, box.Width - 1, box.Height - 1), 4);
+
+        float cx = box.X + box.Width / 2f;
+        float cy = box.Y + box.Height / 2f;
+        float r = Math.Min(box.Width, box.Height) * 0.30f;
+        int cidx = Math.Max(0, Math.Min(Overlay.Palette.Length - 1, p.ColorIndex));
+        Color col = Overlay.Palette[cidx];
+
+        if (!string.IsNullOrEmpty(p.CustomImagePath))
+        {
+            using (var pen = new Pen(Color.FromArgb(125, 211, 252), 1.4f))
+            {
+                g.DrawEllipse(pen, cx - r * 0.85f, cy - r * 0.85f, r * 1.7f, r * 1.7f);
+                g.DrawLine(pen, cx - r * 1.1f, cy, cx - r * 0.45f, cy);
+                g.DrawLine(pen, cx + r * 0.45f, cy, cx + r * 1.1f, cy);
+                g.DrawLine(pen, cx, cy - r * 1.1f, cx, cy - r * 0.45f);
+                g.DrawLine(pen, cx, cy + r * 0.45f, cx, cy + r * 1.1f);
+            }
+            using (var badge = new SolidBrush(Color.FromArgb(56, 189, 248)))
+                g.FillEllipse(badge, box.Right - 6, box.Y + 2, 4, 4);
+            g.SmoothingMode = oldSm;
+            return;
+        }
+
+        using (var pen = new Pen(col, 1.5f))
+        using (var brush = new SolidBrush(col))
+        {
+            switch (p.StyleIndex)
+            {
+                case 0:
+                    g.DrawLine(pen, cx - r, cy, cx - r * 0.38f, cy);
+                    g.DrawLine(pen, cx + r * 0.38f, cy, cx + r, cy);
+                    g.DrawLine(pen, cx, cy - r, cx, cy - r * 0.38f);
+                    g.DrawLine(pen, cx, cy + r * 0.38f, cx, cy + r);
+                    if (p.DotSize > 0) g.FillEllipse(brush, cx - 1.3f, cy - 1.3f, 2.6f, 2.6f);
+                    break;
+                case 1:
+                    g.DrawLine(pen, cx - r, cy, cx + r, cy);
+                    g.DrawLine(pen, cx, cy - r, cx, cy + r);
+                    break;
+                case 2:
+                    g.FillEllipse(brush, cx - r * 0.42f, cy - r * 0.42f, r * 0.84f, r * 0.84f);
+                    break;
+                case 3:
+                {
+                    var pts = new PointF[]
+                    {
+                        new PointF(cx - r * 0.85f, cy - r * 0.45f),
+                        new PointF(cx, cy + r * 0.55f),
+                        new PointF(cx + r * 0.85f, cy - r * 0.45f)
+                    };
+                    g.DrawLines(pen, pts);
+                    break;
+                }
+                case 4:
+                    g.DrawEllipse(pen, cx - r * 0.9f, cy - r * 0.9f, r * 1.8f, r * 1.8f);
+                    g.DrawEllipse(pen, cx - r * 0.42f, cy - r * 0.42f, r * 0.84f, r * 0.84f);
+                    break;
+                default:
+                    g.DrawLine(pen, cx - r, cy, cx - r * 0.35f, cy);
+                    g.DrawLine(pen, cx + r * 0.35f, cy, cx + r, cy);
+                    g.DrawLine(pen, cx, cy + r * 0.35f, cx, cy + r);
+                    if (p.DotSize > 0) g.FillEllipse(brush, cx - 1.2f, cy - 1.2f, 2.4f, 2.4f);
+                    break;
+            }
+        }
+        g.SmoothingMode = oldSm;
     }
 }

@@ -18,39 +18,14 @@ using Windows.Storage.Streams;
 
 public partial class MainForm
 {
-    void LayoutAboutTab()
-    {
-        if (tabs == null || spacerPage == null || aboutPage == null) return;
-        try
-        {
-            int w = tabs.ClientSize.Width;
-            if (w < 260) return;
-            int target = w - 6;                       // "关于"右边要贴到这里
-            spacerPage.Text = "";
-            tabs.PerformLayout();
-
-            // 二分找空格数：让"关于"的右边界尽量贴近 target
-            int lo = 0, hi = 400, best = 0;
-            for (int iter = 0; iter < 9; iter++)
-            {
-                int mid = (lo + hi) / 2;
-                spacerPage.Text = mid == 0 ? "" : new string(' ', mid);
-                tabs.PerformLayout();
-                int right = tabs.GetTabRect(tabs.TabPages.IndexOf(aboutPage)).Right;
-                if (right <= target) { best = mid; lo = mid + 1; }
-                else hi = mid - 1;
-                if (lo > hi) break;
-            }
-            spacerPage.Text = best == 0 ? "" : new string(' ', best);
-            tabs.PerformLayout();
-        }
-        catch { }
-    }
-
     // ---------------- 更新日志 ----------------
     // 格式：版本|日期|第一条~第二条~…（用 ~ 分行）
     static readonly string[] CHANGELOG = new string[]
     {
+        "1.8.1|2026-11-23|" +
+            "界面升级为「左侧可折叠导航栏 + 顶部信息栏 + 底部交互状态胶囊栏」与独立「设置」页：支持点击底栏胶囊直切准星/跳页/热键/三档主题，并支持「关闭时缩进系统托盘」与导航栏折叠持久化~" +
+            "屏幕准星新增可视化方案卡片条（内置 4 套、最多保存 6 套自定义方案）与中心位置 ±20px 微调；挤服页新增「同步线上」按钮及启动自动增量合并线上服务器列表（重复 IP 自动保留玩家备注）~" +
+            "底层与体验优化：OCR 改用零 PNG 内存直传不阻塞、强制 HTTPS 更新校验与防降级、自定义文案与「关于与更新 → 更多设置…」快捷跳转同步升级",
         "1.8.0|2026-11-17|" +
             "调整主界面结构：将「挤服助手」「屏幕准星」「倒计时」独立为主标签页直接切换，右上角常驻「关闭热键」「查看日志」「热键设置」工具栏~" +
             "自定义页支持按标题与正文关键词实时筛选卡片（按 Esc 清空），并保留快捷编辑与剪贴板一键复制~" +
@@ -229,9 +204,10 @@ public partial class MainForm
         return y + lbl.Height + 4;
     }
 
-    TabPage BuildAboutPage()
+    Panel BuildAboutPage()
     {
-        var page = new TabPage("关于");
+        var page = new Panel();
+        page.Text = "关于";
         page.BackColor = Color.White;
 
         var host = new Panel();
@@ -249,7 +225,7 @@ public partial class MainForm
         int x = 20, w = 700, y = 16;
 
         var t1 = new Label();
-        t1.Text = "RX 工具箱";
+        t1.Text = "RX 工具箱" + APP_EDITION_SUFFIX;
         t1.Font = TrackFont("Microsoft YaHei UI", 17f, FontStyle.Bold);
         t1.ForeColor = Color.FromArgb(26, 58, 104);
         t1.SetBounds(x, y, w, 38);
@@ -300,25 +276,21 @@ public partial class MainForm
         tipHelp.SetToolTip(btnUpdHelp, "更新下载不保证稳定，点这里看说明");
         host.Controls.Add(btnUpdHelp);
 
-        chkAutoUpdate = new CheckBox();
-        chkAutoUpdate.Text = "启动时自动检查更新";
-        chkAutoUpdate.Font = fSmall;
-        chkAutoUpdate.SetBounds(x + 318, y + 6, 190, 24);
-        chkAutoUpdate.Checked = autoUpdateOn;
-        chkAutoUpdate.CheckedChanged += delegate
-        {
-            autoUpdateOn = chkAutoUpdate.Checked;
-            SaveSettings();
-        };
-        host.Controls.Add(chkAutoUpdate);
+        var btnMoreSettings = new Button();
+        btnMoreSettings.Text = "更多设置…";
+        btnMoreSettings.FlatStyle = FlatStyle.Flat;
+        btnMoreSettings.FlatAppearance.BorderColor = Color.FromArgb(180, 205, 238);
+        btnMoreSettings.SetBounds(x + 318, y, 128, 34);
+        btnMoreSettings.Click += delegate { SwitchNavPage("settings"); };
+        host.Controls.Add(btnMoreSettings);
         var btnReleases = new Button();
         btnReleases.Text = "GitHub 发布页";
         btnReleases.FlatStyle = FlatStyle.Flat;
         btnReleases.FlatAppearance.BorderColor = Color.FromArgb(180, 205, 238);
-        btnReleases.SetBounds(x + 518, y, 168, 34);
+        btnReleases.SetBounds(x + 456, y, 168, 34);
         btnReleases.Click += delegate { TryOpenHttpUrl("https://github.com/Dauskwn/rx-tools/releases"); };
         host.Controls.Add(btnReleases);
-        y += 46;
+        y += 42;
 
         AddAboutText(host, "更新日志", x + 2, y, 120, fSmall, Color.FromArgb(110, 122, 140), 22);
         y += 24;
@@ -332,7 +304,6 @@ public partial class MainForm
         host.Controls.Add(changelogHost);
         RenderChangelog();
         y += 208;      // 与面板高度 196 对齐，别把下方标题压住
-
 
         // ---------- 声明 ----------
         y = AddAboutSection(host, "声明", x, y, w);
@@ -369,8 +340,8 @@ public partial class MainForm
         lnkRepo.SetBounds(x + 2, y + 4, 460, 22);
         lnkRepo.LinkClicked += delegate
         {
-            try { System.Diagnostics.Process.Start(RepoUrl); }
-            catch { }
+            try { using (var p = System.Diagnostics.Process.Start(RepoUrl)) { } }
+            catch (Exception ex) { Native.LogWarn("OpenRepoUrl", ex); }
         };
         host.Controls.Add(lnkRepo);
         y += 30;
@@ -405,8 +376,8 @@ public partial class MainForm
         lnkIssue.SetBounds(x + 2, y, 460, 22);
         lnkIssue.LinkClicked += delegate
         {
-            try { System.Diagnostics.Process.Start(IssueUrl); }
-            catch { }
+            try { using (var p = System.Diagnostics.Process.Start(IssueUrl)) { } }
+            catch (Exception ex) { Native.LogWarn("OpenIssueUrl", ex); }
         };
         host.Controls.Add(lnkIssue);
         y += 40;
@@ -505,20 +476,96 @@ public partial class MainForm
         SetDynamicLabelColor(lblUpdState, c);
     }
 
-    static string HttpGetText(string url, int timeoutMs)
+    internal static HttpWebRequest CreateHttpRequest(string url, int timeoutMs, string ua, bool useProxy)
     {
-        try { ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072; } catch { }
+        try { ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072 | (SecurityProtocolType)12288; } catch { }
         var req = (HttpWebRequest)WebRequest.Create(url);
         req.Timeout = timeoutMs;
-        req.ReadWriteTimeout = timeoutMs;
-        req.UserAgent = "RXToolbox/" + APP_VERSION_NUM;
-        req.Proxy = null;
-        using (var resp = (HttpWebResponse)req.GetResponse())
-        using (var sr = new StreamReader(resp.GetResponseStream(), Encoding.UTF8))
+        req.ReadWriteTimeout = Math.Max(timeoutMs, 15000);
+        req.UserAgent = string.IsNullOrEmpty(ua) ? ("RXToolbox/" + APP_VERSION_NUM) : ua;
+        if (!useProxy) req.Proxy = null;
+        return req;
+    }
+
+    const long MAX_UPDATE_BYTES = 32L * 1024 * 1024;
+    const int MAX_TEXT_BYTES = 4 * 1024 * 1024;
+    const int MAX_UPDATE_REDIRECTS = 5;
+
+    static byte[] StreamHttpBytes(string url, int timeoutMs, string ua, bool useProxy, int maxBytes)
+    {
+        string currentUrl = url;
+        for (int hop = 0; hop <= MAX_UPDATE_REDIRECTS; hop++)
+        {
+            if (!IsAllowedRedirectTarget(url, currentUrl))
+                throw new InvalidOperationException("请求跳转目标不符合 HTTPS 安全策略");
+
+            var req = CreateHttpRequest(currentUrl, timeoutMs, ua, useProxy);
+            req.AllowAutoRedirect = false;
+
+            using (var resp = (HttpWebResponse)req.GetResponse())
+            {
+                int code = (int)resp.StatusCode;
+                if (code == 301 || code == 302 || code == 303 || code == 307 || code == 308)
+                {
+                    string loc = resp.Headers["Location"];
+                    if (string.IsNullOrEmpty(loc))
+                        throw new InvalidOperationException("重定向缺少 Location 头");
+                    Uri nextUri;
+                    if (!Uri.TryCreate(new Uri(currentUrl), loc, out nextUri))
+                        throw new InvalidOperationException("重定向地址格式无效");
+                    currentUrl = nextUri.AbsoluteUri;
+                    continue;
+                }
+
+                long total = resp.ContentLength;
+                if (total > maxBytes)
+                    throw new IOException("响应文本超过大小上限");
+
+                using (var st = resp.GetResponseStream())
+                using (var ms = new MemoryStream())
+                {
+                    byte[] buf = new byte[16384];
+                    int n;
+                    while ((n = st.Read(buf, 0, buf.Length)) > 0)
+                    {
+                        if (ms.Length + n > maxBytes)
+                            throw new IOException("响应文本流超过大小上限");
+                        ms.Write(buf, 0, n);
+                    }
+                    return ms.ToArray();
+                }
+            }
+        }
+        throw new InvalidOperationException("HTTP 跳转次数过多");
+    }
+
+    internal static byte[] HttpGetBytesWithFallback(string url, int timeoutMs, string ua, int maxBytes)
+    {
+        try
+        {
+            return StreamHttpBytes(url, timeoutMs, ua, true, maxBytes);
+        }
+        catch (WebException we)
+        {
+            if (we.Status == WebExceptionStatus.ProtocolError) throw;
+            return StreamHttpBytes(url, timeoutMs, ua, false, maxBytes);
+        }
+    }
+
+    internal static string HttpGetTextWithFallback(string url, int timeoutMs, string ua)
+    {
+        byte[] raw = HttpGetBytesWithFallback(url, timeoutMs, ua, MAX_TEXT_BYTES);
+        using (var ms = new MemoryStream(raw))
+        using (var sr = new StreamReader(ms, Encoding.UTF8, true))
             return sr.ReadToEnd();
     }
 
-    static string JsonField(string json, string key)
+    internal static string HttpGetText(string url, int timeoutMs)
+    {
+        return HttpGetTextWithFallback(url, timeoutMs, "RXToolbox/" + APP_VERSION_NUM);
+    }
+
+    internal static string JsonField(string json, string key)
     {
         if (string.IsNullOrEmpty(json)) return "";
         Match m = Regex.Match(json, "\"" + key + "\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"");
@@ -526,7 +573,7 @@ public partial class MainForm
         return JsonUnesc(m.Groups[1].Value);
     }
 
-    static int CompareVersion(string a, string b)
+    internal static int CompareVersion(string a, string b)
     {
         string[] pa = (a ?? "").Split('.');
         string[] pb = (b ?? "").Split('.');
@@ -550,17 +597,151 @@ public partial class MainForm
             || u.StartsWith("http://", StringComparison.OrdinalIgnoreCase);
     }
 
-    static bool DownloadAndVerify(string url, string sha, string dest)
+    internal static bool IsHttpsUrl(string u)
+    {
+        if (string.IsNullOrEmpty(u)) return false;
+        return u.StartsWith("https://", StringComparison.OrdinalIgnoreCase);
+    }
+
+    // 允许 https://，以及本机回环调试端口 http://127.0.0.1 / localhost / [::1]；严禁非本机明文 http://
+    internal static bool IsAllowedUpdateUrl(string u)
+    {
+        if (IsHttpsUrl(u)) return true;
+        if (!IsHttpUrl(u)) return false;
+        Uri uri;
+        if (Uri.TryCreate(u, UriKind.Absolute, out uri))
+            return string.Equals(uri.Scheme, "http", StringComparison.OrdinalIgnoreCase) && uri.IsLoopback;
+        return false;
+    }
+
+    internal static bool IsAllowedRedirectTarget(string initialUrl, string targetUrl)
+    {
+        if (IsHttpsUrl(initialUrl)) return IsHttpsUrl(targetUrl);
+        return IsAllowedUpdateUrl(targetUrl);
+    }
+
+    static void StreamHttpDownload(string url, string dest, bool useProxy, Action<int> onPercent)
+    {
+        string currentUrl = url;
+        for (int hop = 0; hop <= MAX_UPDATE_REDIRECTS; hop++)
+        {
+            if (!IsAllowedRedirectTarget(url, currentUrl))
+                throw new InvalidOperationException("更新下载跳转目标不符合 HTTPS 安全策略");
+
+            var req = CreateHttpRequest(currentUrl, 15000, "RXToolbox-Updater", useProxy);
+            req.ReadWriteTimeout = 30000;
+            req.AllowAutoRedirect = false;
+
+            using (var resp = (HttpWebResponse)req.GetResponse())
+            {
+                int code = (int)resp.StatusCode;
+                if (code == 301 || code == 302 || code == 303 || code == 307 || code == 308)
+                {
+                    string loc = resp.Headers["Location"];
+                    if (string.IsNullOrEmpty(loc))
+                        throw new InvalidOperationException("重定向缺少 Location 头");
+                    Uri nextUri;
+                    if (!Uri.TryCreate(new Uri(currentUrl), loc, out nextUri))
+                        throw new InvalidOperationException("重定向地址格式无效");
+                    currentUrl = nextUri.AbsoluteUri;
+                    continue;
+                }
+
+                long total = resp.ContentLength;
+                if (total > MAX_UPDATE_BYTES)
+                    throw new IOException("下载文件超过 32MB 安全上限");
+
+                long done = 0;
+                int lastPct = -1;
+                byte[] buf = new byte[65536];
+                using (var st = resp.GetResponseStream())
+                using (var fs = new FileStream(dest, FileMode.Create, FileAccess.Write, FileShare.None))
+                {
+                    int n;
+                    while ((n = st.Read(buf, 0, buf.Length)) > 0)
+                    {
+                        done += n;
+                        if (done > MAX_UPDATE_BYTES)
+                            throw new IOException("下载流超过 32MB 安全上限");
+                        fs.Write(buf, 0, n);
+                        if (onPercent != null && total > 0)
+                        {
+                            int pct = (int)Math.Min(100L, done * 100L / total);
+                            if (pct >= lastPct + 5 || pct == 100)
+                            {
+                                lastPct = pct;
+                                onPercent(pct);
+                            }
+                        }
+                    }
+                }
+                return;
+            }
+        }
+        throw new InvalidOperationException("更新下载重定向次数过多");
+    }
+
+    internal static bool DownloadAndVerify(string url, string sha, string dest)
+    {
+        return DownloadAndVerify(url, sha, dest, null, false);
+    }
+
+    internal static bool DownloadAndVerify(string url, string sha, string dest, Action<int> onPercent)
+    {
+        return DownloadAndVerify(url, sha, dest, onPercent, false);
+    }
+
+    internal static bool DownloadAndVerify(string url, string sha, string dest, Action<int> onPercent, bool allowLocalFile)
     {
         if (string.IsNullOrEmpty(sha) || sha.Length != 64) return false;
-        try { ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072 | (SecurityProtocolType)12288; } catch { }
-        using (var wc = new WebClient())
+        string localFilePath = "";
+        bool isLocalFile = false;
+        if (allowLocalFile && !string.IsNullOrEmpty(url) && url.StartsWith("file://", StringComparison.OrdinalIgnoreCase))
         {
-            wc.Headers.Add("User-Agent", "RXToolbox-Updater");
-            wc.DownloadFile(url, dest);
+            Uri localUri;
+            if (Uri.TryCreate(url, UriKind.Absolute, out localUri) && localUri.IsFile && !localUri.IsUnc)
+            {
+                localFilePath = localUri.LocalPath;
+                isLocalFile = true;
+            }
+            else
+            {
+                return false;
+            }
         }
-        string got = Sha256File(dest);
-        if (string.Equals(got, sha, StringComparison.OrdinalIgnoreCase)) return true;
+        if (!isLocalFile && !IsAllowedUpdateUrl(url)) return false;
+
+        try { ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072 | (SecurityProtocolType)12288; } catch { }
+        try
+        {
+            if (isLocalFile)
+            {
+                var fi = new FileInfo(localFilePath);
+                if (!fi.Exists || fi.Length > MAX_UPDATE_BYTES)
+                    throw new IOException("本地更新包不存在或超过 32MB 安全上限");
+                File.Copy(fi.FullName, dest, true);
+            }
+            else
+            {
+                try
+                {
+                    StreamHttpDownload(url, dest, true, onPercent);
+                }
+                catch (WebException we)
+                {
+                    if (we.Status == WebExceptionStatus.ProtocolError) throw;
+                    TryDeleteFile(dest, 1);
+                    StreamHttpDownload(url, dest, false, onPercent);
+                }
+            }
+            string got = Sha256File(dest);
+            if (string.Equals(got, sha, StringComparison.OrdinalIgnoreCase)) return true;
+            Native.Log("download verify sha256 mismatch: expected=" + sha + " got=" + got);
+        }
+        catch (Exception ex)
+        {
+            Native.Log("download verify fail: " + ex.Message);
+        }
         TryDeleteFile(dest, 1);
         return false;
     }
@@ -573,19 +754,31 @@ public partial class MainForm
             using (var p = System.Diagnostics.Process.Start(u)) { }
             return true;
         }
-        catch { return false; }
+        catch (Exception ex)
+        {
+            Native.LogWarn("TryOpenHttpUrl", ex);
+            return false;
+        }
     }
 
-    static string Sha256File(string path)
+    static string FormatSha256Hex(byte[] hash)
+    {
+        var sb = new StringBuilder(hash.Length * 2);
+        for (int i = 0; i < hash.Length; i++) sb.Append(hash[i].ToString("x2"));
+        return sb.ToString();
+    }
+
+    internal static string Sha256Bytes(byte[] data)
+    {
+        using (var sha = new System.Security.Cryptography.SHA256Managed())
+            return FormatSha256Hex(sha.ComputeHash(data ?? new byte[0]));
+    }
+
+    internal static string Sha256File(string path)
     {
         using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
         using (var sha = new System.Security.Cryptography.SHA256Managed())
-        {
-            byte[] hash = sha.ComputeHash(fs);
-            var sb = new StringBuilder(hash.Length * 2);
-            for (int i = 0; i < hash.Length; i++) sb.Append(hash[i].ToString("x2"));
-            return sb.ToString();
-        }
+            return FormatSha256Hex(sha.ComputeHash(fs));
     }
 
     public static bool CanWriteDir(string dir)
@@ -836,7 +1029,13 @@ public partial class MainForm
     void StartSelfUpdate()
     {
         string u = !string.IsNullOrEmpty(updLatestUrl) ? updLatestUrl : updLatestFallback;
-        if (!IsHttpUrl(u)) { ShowUpdateHelp(); return; }
+        if (!IsAllowedUpdateUrl(u))
+        {
+            if (IsHttpUrl(u))
+                SetUpdState("仅支持 https:// 安全更新地址（或本机回环调试端口），请检查配置或手动下载", Color.FromArgb(184, 88, 44));
+            ShowUpdateHelp();
+            return;
+        }
 
         string exePath = Application.ExecutablePath;
         string dir = Path.GetDirectoryName(exePath);
@@ -867,7 +1066,13 @@ public partial class MainForm
             string err = null;
             try
             {
-                if (!DownloadAndVerify(u, sha, updExe))
+                if (!DownloadAndVerify(u, sha, updExe, delegate(int pct)
+                {
+                    SafeBeginInvoke(delegate
+                    {
+                        if (updBusy) SetUpdState("正在下载新版本… " + pct + "%", Color.FromArgb(60, 90, 140));
+                    });
+                }))
                     throw new Exception("程序文件校验不一致（可能下载不完整）");
             }
             catch (Exception ex) { err = ex.Message; }
@@ -923,6 +1128,7 @@ public partial class MainForm
 
                 SetUpdState("下载并替换完成，正在重启…", Color.FromArgb(20, 130, 70));
                 Native.Log("update: launched new instance --after-update " + pid);
+                allowRealExit = true;
                 Application.Exit();
             });
         });
@@ -936,6 +1142,11 @@ public partial class MainForm
         if (string.IsNullOrEmpty(updateUrl))
         {
             SetUpdState("未配置更新地址（当前版本不会联网）", Color.FromArgb(120, 128, 140));
+            return;
+        }
+        if (!IsAllowedUpdateUrl(updateUrl))
+        {
+            if (manual) SetUpdState("更新地址必须以 https:// 开头（或为本机回环调试端口），请检查 settings.ini", Color.FromArgb(184, 88, 44));
             return;
         }
         updBusy = true;
@@ -961,52 +1172,60 @@ public partial class MainForm
             }
 
             string ver = JsonField(json, "version");
+            string minVer = JsonField(json, "minVersion");
             string dl = JsonField(json, "url");
             string fb = JsonField(json, "fallback");
             string notes = JsonField(json, "notes");
             string sha = JsonField(json, "sha256");
+            string srvUrl = JsonField(json, "serversUrl");
+            string srvSha = JsonField(json, "serversSha256");
             // JsonField 已把 \n 还原成真换行，这里不再处理
 
-            try
+            SafeBeginInvoke(delegate
             {
-                BeginInvoke((MethodInvoker)delegate
+                updBusy = false;
+                if (btnUpdCheck != null) btnUpdCheck.Enabled = true;
+
+                if (err != null)
                 {
-                    updBusy = false;
-                    if (btnUpdCheck != null) btnUpdCheck.Enabled = true;
+                    if (manual) SetUpdState("检查失败（" + err + "）：网络异常或服务器无响应，请稍后重试“检查更新”", Color.FromArgb(184, 88, 44));
+                    return;
+                }
+                if (string.IsNullOrEmpty(ver))
+                {
+                    if (manual) SetUpdState("更新信息格式不对，稍后再试", Color.FromArgb(184, 88, 44));
+                    return;
+                }
 
-                    if (err != null)
-                    {
-                        if (manual) SetUpdState("检查失败（" + err + "）：网络异常或服务器无响应，请稍后重试“检查更新”", Color.FromArgb(184, 88, 44));
-                        return;
-                    }
-                    if (string.IsNullOrEmpty(ver))
-                    {
-                        if (manual) SetUpdState("更新信息格式不对，稍后再试", Color.FromArgb(184, 88, 44));
-                        return;
-                    }
+                updLatestVersion = ver;
+                updLatestUrl = dl;
+                updLatestFallback = fb;
+                updLatestSha = sha;
+                updLatestServersUrl = srvUrl;
+                updLatestServersSha = srvSha;
+                if (!string.IsNullOrEmpty(srvUrl))
+                    SyncOnlineServersAsync(srvUrl, srvSha, false);
 
-                    updLatestVersion = ver;
-                    updLatestUrl = dl;
-                    updLatestFallback = fb;
-                    updLatestSha = sha;
-
-                    if (CompareVersion(ver, APP_VERSION_NUM) > 0)
-                    {
-                        SetUpdState("发现新版本 v" + ver + "（当前 " + APP_VERSION_NUM + "）", Color.FromArgb(20, 130, 70));
-                        if (btnUpdOpen != null) btnUpdOpen.Enabled = true;
-                        updLatestNotes = notes;
-                        RenderChangelog();
-                        if (toast != null) toast.ShowText("发现新版本 v" + ver + "，可在“关于”页查看详情");
-                    }
+                if (CompareVersion(ver, APP_VERSION_NUM) > 0)
+                {
+                    bool belowMin = !string.IsNullOrEmpty(minVer) && CompareVersion(APP_VERSION_NUM, minVer) < 0;
+                    if (belowMin)
+                        SetUpdState("⚠ 发现必要兼容更新 v" + ver + "（当前低于最低兼容版本 " + minVer + "），请立即更新", Color.FromArgb(184, 88, 44));
                     else
-                    {
-                        SetUpdState("已是最新版本（" + APP_VERSION_NUM + "）", Color.FromArgb(60, 110, 90));
-                        if (btnUpdOpen != null) btnUpdOpen.Enabled = false;
-                        if (manual && !string.IsNullOrEmpty(notes)) updLatestNotes = notes;
-                    }
-                });
-            }
-            catch { }
+                        SetUpdState("发现新版本 v" + ver + "（当前 " + APP_VERSION_NUM + "）", Color.FromArgb(20, 130, 70));
+                    if (btnUpdOpen != null) btnUpdOpen.Enabled = true;
+                    updLatestNotes = notes;
+                    RenderChangelog();
+                    if (toast != null)
+                        toast.ShowText(belowMin ? ("发现必要更新 v" + ver + "，请前往“关于”页立即更新") : ("发现新版本 v" + ver + "，可在“关于”页查看详情"));
+                }
+                else
+                {
+                    SetUpdState("已是最新版本（" + APP_VERSION_NUM + "）", Color.FromArgb(60, 110, 90));
+                    if (btnUpdOpen != null) btnUpdOpen.Enabled = false;
+                    if (manual && !string.IsNullOrEmpty(notes)) updLatestNotes = notes;
+                }
+            });
         });
         updThread.IsBackground = true;
         updThread.Start();

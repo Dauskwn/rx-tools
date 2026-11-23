@@ -37,13 +37,20 @@ public partial class MainForm
             return new IPEndPoint(ip, port);
         try
         {
-            IAsyncResult ar = Dns.BeginGetHostAddresses(host, null, null);
-            using (WaitHandle wh = ar.AsyncWaitHandle)
+            IPAddress[] addrs = null;
+            using (var done = new ManualResetEventSlim(false))
             {
-                if (!wh.WaitOne(Math.Max(300, timeoutMs)))
+                Dns.BeginGetHostAddresses(host, delegate(IAsyncResult ar)
+                {
+                    try { addrs = Dns.EndGetHostAddresses(ar); }
+                    catch { }
+                    try { done.Set(); }
+                    catch { }
+                }, null);
+                if (!done.Wait(Math.Max(300, timeoutMs)))
                     return null;
             }
-            IPAddress[] addrs = Dns.EndGetHostAddresses(ar);
+            if (addrs == null) return null;
             for (int i = 0; i < addrs.Length; i++)
                 if (addrs[i].AddressFamily == AddressFamily.InterNetwork)
                     return new IPEndPoint(addrs[i], port);
@@ -114,16 +121,24 @@ public partial class MainForm
         for (int i = 0; i < total; i++)
         {
             byte[] ch = chunks[i];
-            if (ch == null) return null;
-            int offset = (i > 0 && ch.Length >= 4 && ch[0] == 0xFF && ch[1] == 0xFF && ch[2] == 0xFF && ch[3] == 0xFF) ? 4 : 0;
-            ms.Write(ch, offset, ch.Length - offset);
+            if (ch == null || ch.Length > 65536 || ms.Length + ch.Length > 65536) return null;
+            ms.Write(ch, 0, ch.Length);
         }
         return ms.ToArray();
     }
 
     static bool A2SQuery(string host, int port, int timeoutMs, out string name, out int players, out int maxPlayers)
     {
+        string dummyMap;
+        int dummyPing;
+        return A2SQuery(host, port, timeoutMs, out name, out dummyMap, out dummyPing, out players, out maxPlayers);
+    }
+
+    static bool A2SQuery(string host, int port, int timeoutMs, out string name, out string map, out int pingMs, out int players, out int maxPlayers)
+    {
         name = "";
+        map = "";
+        pingMs = -1;
         players = 0;
         maxPlayers = 0;
         try
@@ -133,25 +148,30 @@ public partial class MainForm
             using (var udp = new UdpClient())
             {
                 udp.Client.ReceiveTimeout = timeoutMs;
+                var sw = System.Diagnostics.Stopwatch.StartNew();
                 byte[] req = A2SReq(null);
                 udp.Send(req, req.Length, ep);
                 IPEndPoint from = new IPEndPoint(IPAddress.Any, 0);
                 byte[] resp = udp.Receive(ref from);
+                long rtt = sw.ElapsedMilliseconds;
                 if (!SameEndPoint(from, ep)) return false;
 
                 int tries = 0;
                 while (resp != null && resp.Length >= 9 && IsSimpleHeader(resp, 0x41) && tries < 2)
                 {
                     tries++;
+                    sw.Restart();
                     byte[] req2 = A2SReq(new byte[] { resp[5], resp[6], resp[7], resp[8] });
                     udp.Send(req2, req2.Length, ep);
                     from = new IPEndPoint(IPAddress.Any, 0);
                     resp = udp.Receive(ref from);
+                    rtt = sw.ElapsedMilliseconds;
                     if (!SameEndPoint(from, ep)) return false;
                 }
 
                 resp = ReceiveA2SPayload(udp, ep, resp);
                 if (resp == null || resp.Length < 6 || !IsSimpleHeader(resp, 0x49)) return false;
+                pingMs = (int)Math.Max(1, Math.Min(9999, rtt));
                 int p = 6;
                 int nend = p;
                 while (nend < resp.Length && resp[nend] != 0) nend++;
@@ -159,10 +179,13 @@ public partial class MainForm
                 name = Encoding.UTF8.GetString(resp, p, Math.Max(0, nend - p));
                 p = nend + 1;
 
+                // 第 1 个附带字段为当前地图名，后面 2 个为 folder 与 game
                 for (int i = 0; i < 3; i++)
                 {
+                    int start = p;
                     while (p < resp.Length && resp[p] != 0) p++;
                     if (p >= resp.Length) return false;
+                    if (i == 0) map = Encoding.UTF8.GetString(resp, start, Math.Max(0, p - start));
                     p++;
                 }
 
@@ -175,6 +198,7 @@ public partial class MainForm
         }
         catch { return false; }
     }
+
 
     static string AddrOf(string entry)
     {
@@ -190,15 +214,6 @@ public partial class MainForm
         if (pJoinPanel == null) return;
         int W = pJoinPanel.ClientSize.Width;
         int H = pJoinPanel.ClientSize.Height;
-        try
-        {
-            if (tabs != null && pJoinPanel.Parent != null)
-            {
-                int cap = tabs.DisplayRectangle.Height - pJoinPanel.Top - 6;
-                if (cap > 200 && cap < H) H = cap;
-            }
-        }
-        catch { }
         laidW = W;
         laidH = H;
         if (W < 360) W = 360;
@@ -208,7 +223,12 @@ public partial class MainForm
         if (btnRefreshFav != null)
         {
             btnRefreshFav.SetBounds(bx - 104, 46, 104, 28);
-            bx -= 114;
+            bx -= 112;
+        }
+        if (btnSyncSrv != null)
+        {
+            btnSyncSrv.SetBounds(bx - 82, 46, 82, 28);
+            bx -= 90;
         }
         if (btnUncheckAll != null)
         {
@@ -244,7 +264,24 @@ public partial class MainForm
         int listH = Math.Max(80, listBottom - 80);
         if (lblTapGuide != null) lblTapGuide.SetBounds(8, 80, W - 16, listH);
         if (lvSrv != null) lvSrv.SetBounds(8, 80, W - 16, listH);
-        if (lvSrv != null && lvSrv.Columns.Count == 4)
+        if (lvSrv != null && lvSrv.Columns.Count == 6)
+        {
+            int wAlias = 104, wMap = 132, wPing = 64, wPl = 108, wAddr = 148;
+            int wReal = W - 16 - wAlias - wMap - wPing - wPl - wAddr - 26;
+            if (wReal < 140)
+            {
+                wMap = 100;
+                wAddr = 134;
+                wReal = Math.Max(120, W - 16 - wAlias - wMap - wPing - wPl - wAddr - 26);
+            }
+            lvSrv.Columns[0].Width = wAlias;
+            lvSrv.Columns[1].Width = wReal;
+            lvSrv.Columns[2].Width = wMap;
+            lvSrv.Columns[3].Width = wPing;
+            lvSrv.Columns[4].Width = wPl;
+            lvSrv.Columns[5].Width = wAddr;
+        }
+        else if (lvSrv != null && lvSrv.Columns.Count == 4)
         {
             int wAddr = 156, wPl = 104, wAlias = 106;
             int wReal = W - 16 - wAddr - wPl - wAlias - 26;
@@ -305,11 +342,15 @@ public partial class MainForm
         favCount = new int[favList.Length];
         favMax = new int[favList.Length];
         favName = new string[favList.Length];
+        favMap = new string[favList.Length];
+        favPing = new int[favList.Length];
         for (int i = 0; i < favList.Length; i++)
         {
             favCount[i] = -2;      // -2 = 还没查过（显示 —），-1 = 查询失败
             favMax[i] = 0;
             favName[i] = "";
+            favMap[i] = "";
+            favPing[i] = -1;
             string addr = AddrOf(favList[i]);
             string[] parts = favList[i].Split('|');
             string nm = (parts.Length > 1) ? parts[1].Trim() : "";
@@ -319,6 +360,8 @@ public partial class MainForm
             var it = new ListViewItem(nm);
             it.UseItemStyleForSubItems = false;
             it.SubItems.Add(cached.Length > 0 ? cached : "—");
+            it.SubItems.Add("—");
+            it.SubItems.Add("—");
             it.SubItems.Add("—");
             it.SubItems.Add(addr);
             it.Tag = addr;
@@ -367,7 +410,9 @@ public partial class MainForm
         it.BackColor = rowBg;
         it.SubItems[0].BackColor = rowBg;
         it.SubItems[1].BackColor = rowBg;
+        it.SubItems[2].BackColor = rowBg;
         it.SubItems[3].BackColor = rowBg;
+        it.SubItems[5].BackColor = rowBg;
         it.SubItems[0].ForeColor = isCurrentTarget
             ? (IsDark ? Color.FromArgb(88, 166, 255) : Color.FromArgb(24, 64, 128))
             : (IsDark ? Color.FromArgb(230, 237, 243) : Color.FromArgb(30, 41, 59));
@@ -378,10 +423,23 @@ public partial class MainForm
         if (it.SubItems[1].Text != rname) it.SubItems[1].Text = rname;
         it.SubItems[1].ForeColor = IsDark ? Color.FromArgb(201, 209, 217) : Color.FromArgb(51, 65, 85);
 
+        // 地图列
+        string mp = (i < favMap.Length && !string.IsNullOrEmpty(favMap[i])) ? favMap[i] : "—";
+        if (it.SubItems[2].Text != mp) it.SubItems[2].Text = mp;
+        it.SubItems[2].ForeColor = ThemePalette.TextSecondary;
+
+        // 延迟列
+        int ping = (i < favPing.Length) ? favPing[i] : -1;
+        string pingTxt = (ping > 0) ? (ping + "ms") : "—";
+        if (it.SubItems[3].Text != pingTxt) it.SubItems[3].Text = pingTxt;
+        it.SubItems[3].ForeColor = (ping <= 0) ? ThemePalette.TextMuted
+            : (ping < 65 ? ThemePalette.Success : (ping < 140 ? ThemePalette.Warning : ThemePalette.Danger));
+
         string txt;
         Color fg;
         Color bg = rowBg;
         bool boldCount = false;
+        int[] capTag = null;
         if (favCount[i] == -3)
         {
             txt = "查询中…";
@@ -401,6 +459,7 @@ public partial class MainForm
         {
             bool full = favMax[i] > 0 && favCount[i] >= favMax[i];
             txt = favCount[i] + "/" + favMax[i] + (full ? " [满]" : " [空]");
+            capTag = new int[] { favCount[i], favMax[i] };
             if (IsDark)
             {
                 fg = full ? Color.FromArgb(255, 161, 152) : Color.FromArgb(126, 231, 135);
@@ -413,12 +472,13 @@ public partial class MainForm
             }
             boldCount = true;
         }
-        if (it.SubItems[2].Text != txt) it.SubItems[2].Text = txt;
-        it.SubItems[2].ForeColor = fg;
-        it.SubItems[2].BackColor = bg;
-        it.SubItems[2].Font = TrackFont("Microsoft YaHei UI", 9f, boldCount ? FontStyle.Bold : FontStyle.Regular);
+        if (it.SubItems[4].Text != txt) it.SubItems[4].Text = txt;
+        it.SubItems[4].ForeColor = fg;
+        it.SubItems[4].BackColor = bg;
+        it.SubItems[4].Tag = capTag;
+        it.SubItems[4].Font = TrackFont("Microsoft YaHei UI", 9f, boldCount ? FontStyle.Bold : FontStyle.Regular);
 
-        it.SubItems[3].ForeColor = IsDark ? Color.FromArgb(139, 148, 158) : Color.FromArgb(100, 116, 139);
+        it.SubItems[5].ForeColor = IsDark ? Color.FromArgb(139, 148, 158) : Color.FromArgb(100, 116, 139);
         if (lvSrv.IsHandleCreated) lvSrv.Invalidate(it.Bounds);
     }
 
@@ -466,6 +526,18 @@ public partial class MainForm
             }
             else if (col == 2)
             {
+                string ma = a < favMap.Length ? (favMap[a] ?? "") : "";
+                string mb = b < favMap.Length ? (favMap[b] ?? "") : "";
+                cmp = string.Compare(ma, mb, StringComparison.OrdinalIgnoreCase);
+            }
+            else if (col == 3)
+            {
+                int pa = (a < favPing.Length && favPing[a] > 0) ? favPing[a] : int.MaxValue;
+                int pb = (b < favPing.Length && favPing[b] > 0) ? favPing[b] : int.MaxValue;
+                cmp = pa.CompareTo(pb);
+            }
+            else if (col == 4)
+            {
                 // 按空位优先级排序：有空位(0) < 满员(1) < 未查/失败(2)
                 int rankA = (favCount[a] >= 0 && favMax[a] > 0) ? (favCount[a] < favMax[a] ? 0 : 1) : 2;
                 int rankB = (favCount[b] >= 0 && favMax[b] > 0) ? (favCount[b] < favMax[b] ? 0 : 1) : 2;
@@ -483,6 +555,8 @@ public partial class MainForm
         int[] newCnt = new int[n];
         int[] newMax = new int[n];
         string[] newNam = new string[n];
+        string[] newMap = new string[n];
+        int[] newPing = new int[n];
         for (int i = 0; i < n; i++)
         {
             int old = order[i];
@@ -490,6 +564,8 @@ public partial class MainForm
             newCnt[i] = old < favCount.Length ? favCount[old] : -2;
             newMax[i] = old < favMax.Length ? favMax[old] : 0;
             newNam[i] = old < favName.Length ? favName[old] : "";
+            newMap[i] = old < favMap.Length ? favMap[old] : "";
+            newPing[i] = old < favPing.Length ? favPing[old] : -1;
         }
         favList = newFav;
         SaveFavs();
@@ -500,6 +576,8 @@ public partial class MainForm
         favCount = newCnt;
         favMax = newMax;
         favName = newNam;
+        favMap = newMap;
+        favPing = newPing;
         for (int i = 0; i < n; i++)
         {
             string addr = AddrOf(favList[i]);
@@ -509,6 +587,8 @@ public partial class MainForm
             var it = new ListViewItem(nm);
             it.UseItemStyleForSubItems = false;
             it.SubItems.Add(cached.Length > 0 ? cached : "—");
+            it.SubItems.Add("—");
+            it.SubItems.Add("—");
             it.SubItems.Add("—");
             it.SubItems.Add(addr);
             it.Tag = addr;
@@ -610,21 +690,22 @@ public partial class MainForm
             int pn2;
             if (colon <= 0 || !int.TryParse(addrQ.Substring(colon + 1), out pn2))
             {
-                DoneOneFav(myVer, fi, addrQ, false, 0, 0, "");
+                DoneOneFav(myVer, fi, addrQ, false, 0, 0, "", "", -1);
                 continue;
             }
             string host2 = addrQ.Substring(0, colon).Trim();
             Task.Run(delegate
             {
-                string nm2 = "";
-                int p3 = 0, m3 = 0;
+                string nm2 = "", mp2 = "";
+                int p3 = 0, m3 = 0, png2 = -1;
                 bool ok2 = false;
-                try { ok2 = A2SQuery(host2, pn2, 1400, out nm2, out p3, out m3); }
+                try { ok2 = A2SQuery(host2, pn2, 1400, out nm2, out mp2, out png2, out p3, out m3); }
                 catch { ok2 = false; }
-                int pv = ok2 ? p3 : 0, mv = ok2 ? m3 : 0;
+                int pv = ok2 ? p3 : 0, mv = ok2 ? m3 : 0, pgv = ok2 ? png2 : -1;
                 bool okv = ok2;
                 string nmv = ok2 ? nm2 : "";
-                SafeBeginInvoke(delegate { DoneOneFav(myVer, fi, addrQ, okv, pv, mv, nmv); });
+                string mpv = ok2 ? mp2 : "";
+                SafeBeginInvoke(delegate { DoneOneFav(myVer, fi, addrQ, okv, pv, mv, nmv, mpv, pgv); });
             });
         }
     }
@@ -666,20 +747,22 @@ public partial class MainForm
         int myVer = favVersion;
         Task.Run(delegate
         {
-            string nm2 = "";
-            int p3 = 0, m3 = 0;
+            string nm2 = "", mp2 = "";
+            int p3 = 0, m3 = 0, png2 = -1;
             bool ok2 = false;
-            try { ok2 = A2SQuery(host2, pn2, 2500, out nm2, out p3, out m3); }
+            try { ok2 = A2SQuery(host2, pn2, 2500, out nm2, out mp2, out png2, out p3, out m3); }
             catch { ok2 = false; }
             if (!ok2) return;                       // 还失败就保留「超时/失败」
-            int pv = p3, mv = m3;
-            string nmv = nm2;
+            int pv = p3, mv = m3, pgv = png2;
+            string nmv = nm2, mpv = mp2;
             SafeBeginInvoke(delegate
             {
                 if (myVer != favVersion) return;
                 if (fi < 0 || fi >= favCount.Length) return;
                 favCount[fi] = pv;
                 favMax[fi] = mv;
+                if (fi < favMap.Length) favMap[fi] = mpv;
+                if (fi < favPing.Length) favPing[fi] = pgv;
                 if (!string.IsNullOrEmpty(nmv) && fi < favName.Length) favName[fi] = nmv;
                 if (CacheSrvName(fi, nmv)) SaveFavs();
                 UpdateSrvRow(fi);
@@ -709,12 +792,12 @@ public partial class MainForm
 
         Task.Run(delegate
         {
-            string nm2 = "";
-            int p3 = 0, m3 = 0;
+            string nm2 = "", mp2 = "";
+            int p3 = 0, m3 = 0, png2 = -1;
             bool ok2 = false;
-            try { ok2 = A2SQuery(host2, pn2, 850, out nm2, out p3, out m3); }
+            try { ok2 = A2SQuery(host2, pn2, 850, out nm2, out mp2, out png2, out p3, out m3); }
             catch { ok2 = false; }
-            int pv = ok2 ? p3 : 0, mv = ok2 ? m3 : 0;
+            int pv = ok2 ? p3 : 0, mv = ok2 ? m3 : 0, pgv = ok2 ? png2 : -1;
             bool okv = ok2;
             SafeBeginInvoke(delegate
             {
@@ -722,6 +805,8 @@ public partial class MainForm
                 if (!string.Equals(AddrOf(favList[fi]), addrQ, StringComparison.OrdinalIgnoreCase)) return;
                 favCount[fi] = okv ? pv : -1;
                 favMax[fi] = okv ? mv : 0;
+                if (fi < favMap.Length) favMap[fi] = okv ? mp2 : "";
+                if (fi < favPing.Length) favPing[fi] = okv ? pgv : -1;
                 if (okv && fi < favName.Length && !string.IsNullOrEmpty(nm2)) favName[fi] = nm2;
                 if (okv && CacheSrvName(fi, nm2)) SaveFavs();
                 UpdateSrvRow(fi);
@@ -744,7 +829,7 @@ public partial class MainForm
         return true;
     }
 
-    void DoneOneFav(int ver, int fi, string expectedAddr, bool ok, int players, int maxP, string srvName)
+    void DoneOneFav(int ver, int fi, string expectedAddr, bool ok, int players, int maxP, string srvName, string mapName, int pingMs)
     {
         if (ver != favVersion) return;
         if (fi >= 0 && fi < favCount.Length && fi < favList.Length
@@ -752,6 +837,8 @@ public partial class MainForm
         {
             favCount[fi] = ok ? players : -1;
             favMax[fi] = ok ? maxP : 0;
+            if (fi < favMap.Length) favMap[fi] = ok ? (mapName ?? "") : "";
+            if (fi < favPing.Length) favPing[fi] = ok ? pingMs : -1;
             if (ok && fi < favName.Length && !string.IsNullOrEmpty(srvName)) favName[fi] = srvName;
             if (ok && CacheSrvName(fi, srvName)) favDirty = true;
             UpdateSrvRow(fi);
@@ -899,7 +986,7 @@ public partial class MainForm
         toast.ShowText("已删除 " + what);
     }
 
-    static bool ParseHostPort(string raw, out string host, out int port)
+    internal static bool ParseHostPort(string raw, out string host, out int port)
     {
         host = "";
         port = 0;
@@ -1081,4 +1168,221 @@ public partial class MainForm
         toast.ShowText("正在刷新 " + idxs.Count + " 个服务器的人数…");
     }
 
+    internal static List<string[]> ParseRemoteServersText(string raw)
+    {
+        var list = new List<string[]>();
+        if (string.IsNullOrEmpty(raw)) return list;
+        string text = raw.Trim().TrimStart('\uFEFF');
+        if (text.Length == 0) return list;
+
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        Action<string, string> addPair = delegate(string rawAddr, string rawAlias)
+        {
+            string addr = (rawAddr ?? "").Trim();
+            string alias = (rawAlias ?? "").Replace("|", " ").Replace("\r", "").Replace("\n", "").Replace("\t", " ").Trim();
+            if (addr.Length == 0 || addr.IndexOfAny(new char[] { ' ', '\t', '\r', '\n', '/', '|' }) >= 0) return;
+            int colon = addr.LastIndexOf(':');
+            if (colon <= 0 || colon >= addr.Length - 1) return;
+            string host = addr.Substring(0, colon).Trim();
+            if (host.Length == 0) return;
+            int port;
+            if (!int.TryParse(addr.Substring(colon + 1), out port) || port < 1 || port > 65535) return;
+            if (!seen.Add(addr)) return;
+            list.Add(new string[] { addr, alias });
+        };
+
+        if (text.StartsWith("[", StringComparison.Ordinal) || text.StartsWith("{", StringComparison.Ordinal))
+        {
+            MatchCollection ms = Regex.Matches(text, @"\{[^{}]*\}");
+            for (int i = 0; i < ms.Count; i++)
+            {
+                string obj = ms[i].Value;
+                addPair(JsonField(obj, "addr"), JsonField(obj, "alias"));
+            }
+            return list;
+        }
+
+        string[] lines = text.Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+        for (int i = 0; i < lines.Length; i++)
+        {
+            string ln = lines[i].Trim();
+            if (ln.Length == 0 || ln.StartsWith("#", StringComparison.Ordinal)) continue;
+            int bar = ln.IndexOf('|');
+            if (bar >= 0) addPair(ln.Substring(0, bar), ln.Substring(bar + 1));
+            else addPair(ln, "");
+        }
+        return list;
+    }
+
+    internal static string[] MergeOnlineServers(string[] existing, List<string[]> incoming, out int addedCount)
+    {
+        addedCount = 0;
+        var merged = new List<string>();
+        var known = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (existing != null)
+        {
+            for (int i = 0; i < existing.Length; i++)
+            {
+                string raw = (existing[i] ?? "").Trim();
+                if (raw.Length == 0) continue;
+                merged.Add(raw);
+                string a = AddrOf(raw);
+                if (a.Length > 0) known.Add(a);
+            }
+        }
+        if (incoming != null)
+        {
+            for (int i = 0; i < incoming.Count; i++)
+            {
+                string[] item = incoming[i];
+                if (item == null || item.Length == 0 || string.IsNullOrEmpty(item[0])) continue;
+                string addr = item[0].Trim();
+                if (!known.Add(addr)) continue;
+                string alias = (item.Length > 1 && !string.IsNullOrEmpty(item[1]))
+                    ? item[1].Replace("|", " ").Trim() : "";
+                merged.Add(alias.Length > 0 ? (addr + "|" + alias) : addr);
+                addedCount++;
+            }
+        }
+        return merged.ToArray();
+    }
+
+    void TriggerManualServerSync()
+    {
+        if (!string.IsNullOrEmpty(updLatestServersUrl))
+        {
+            SyncOnlineServersAsync(updLatestServersUrl, updLatestServersSha, true);
+            return;
+        }
+        if (string.IsNullOrEmpty(updateUrl) || !IsAllowedUpdateUrl(updateUrl))
+        {
+            if (toast != null) toast.ShowText("未配置线上更新地址");
+            return;
+        }
+        SyncOnlineServersAsync("", "", true);
+    }
+
+    void SyncOnlineServersAsync(string srvUrl, string srvSha, bool manual)
+    {
+        if (!string.IsNullOrEmpty(srvUrl) && !IsAllowedUpdateUrl(srvUrl))
+        {
+            if (manual && toast != null) toast.ShowText("线上服务器地址不符合安全策略");
+            return;
+        }
+        if (srvSyncBusy)
+        {
+            if (manual && toast != null) toast.ShowText("正在同步线上列表，请稍候…");
+            return;
+        }
+        srvSyncBusy = true;
+        if (manual && btnSyncSrv != null)
+        {
+            btnSyncSrv.Enabled = false;
+            btnSyncSrv.Text = "同步中…";
+        }
+
+        string initialUrl = srvUrl ?? "";
+        string initialSha = srvSha ?? "";
+        string updUrl = updateUrl;
+
+        var th = new Thread(delegate()
+        {
+            string url = initialUrl;
+            string sha = initialSha;
+            string errMsg = null;
+            bool emptyRemote = false;
+            List<string[]> parsed = null;
+
+            try
+            {
+                if (string.IsNullOrEmpty(url))
+                {
+                    if (string.IsNullOrEmpty(updUrl) || !IsAllowedUpdateUrl(updUrl))
+                        throw new Exception("未配置线上更新地址");
+                    string verJson = HttpGetText(updUrl, 10000);
+                    url = JsonField(verJson, "serversUrl");
+                    sha = JsonField(verJson, "serversSha256");
+                    if (string.IsNullOrEmpty(url)) emptyRemote = true;
+                }
+                if (!emptyRemote)
+                {
+                    if (!IsAllowedUpdateUrl(url))
+                        throw new Exception("线上服务器地址不符合 HTTPS 安全策略");
+                    byte[] rawBytes = HttpGetBytesWithFallback(url, 10000, "RXToolbox/" + APP_VERSION_NUM, 256 * 1024);
+                    if (!string.IsNullOrEmpty(sha))
+                    {
+                        if (sha.Length != 64 || !string.Equals(Sha256Bytes(rawBytes), sha, StringComparison.OrdinalIgnoreCase))
+                            throw new Exception("服务器列表校验不一致");
+                    }
+                    parsed = ParseRemoteServersText(Encoding.UTF8.GetString(rawBytes));
+                }
+            }
+            catch (Exception ex)
+            {
+                errMsg = ex.Message;
+                Native.Log("server sync EX: " + ex.Message);
+            }
+
+            if (isClosing || IsDisposed)
+            {
+                srvSyncBusy = false;
+                return;
+            }
+
+            SafeBeginInvoke(delegate
+            {
+                srvSyncBusy = false;
+                if (btnSyncSrv != null)
+                {
+                    btnSyncSrv.Enabled = true;
+                    btnSyncSrv.Text = "同步线上";
+                }
+                if (!string.IsNullOrEmpty(url))
+                {
+                    updLatestServersUrl = url;
+                    updLatestServersSha = sha ?? "";
+                }
+                else if (emptyRemote)
+                {
+                    updLatestServersUrl = "";
+                    updLatestServersSha = "";
+                }
+                if (errMsg != null)
+                {
+                    if (manual && toast != null) toast.ShowText("同步线上列表失败：" + errMsg);
+                    return;
+                }
+                if (emptyRemote || parsed == null || parsed.Count == 0)
+                {
+                    if (manual && toast != null) toast.ShowText("线上暂未发布服务器列表");
+                    return;
+                }
+
+                int added;
+                string[] next = MergeOnlineServers(favList, parsed, out added);
+                if (added > 0)
+                {
+                    string keepSel = SelectedAddr();
+                    favList = next;
+                    SaveFavs();
+                    FillSrvList(keepSel);
+                    RefreshAllFavs();
+                    UpdateHeaderBar();
+                    Native.Log("server sync: added " + added + " (total " + favList.Length + ")");
+                    if (toast != null)
+                    {
+                        toast.ShowText(manual
+                            ? ("已同步线上列表：新增 " + added + " 个（已有备注已保留）")
+                            : ("已同步线上服务器列表：新增 " + added + " 个"));
+                    }
+                }
+                else if (manual && toast != null)
+                {
+                    toast.ShowText("线上列表中的服务器均已在收藏中（共 " + favList.Length + " 个）");
+                }
+            });
+        });
+        th.IsBackground = true;
+        th.Start();
+    }
 }

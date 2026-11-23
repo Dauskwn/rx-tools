@@ -18,30 +18,46 @@ using Windows.Storage.Streams;
 
 public partial class MainForm : Form
 {
-    public const string APP_VERSION = "V1.8.0";
+    public const string APP_VERSION = "V1.8.1";
 
     Overlay overlay;
     Toast toast;
     System.Windows.Forms.Timer tick;
-    Label lblStatus;
     ComboBox cmbSpeed;
     ComboBox cmbStyle;
     ComboBox cmbColor;
-    NumericUpDown nThick, nLen, nGap, nDot;
+    NumericUpDown nThick, nLen, nGap, nDot, nCrossOutline, nCrossOpacity;
+    NumericUpDown nCrossOffX, nCrossOffY;
+    Label lblCrossOffBadge;
     CrosshairPreview crossPreview;
+    Panel pCrossPanel, cardCrossPreset, cardCrossOffset;
+    CrosshairPresetStrip crossPresetStrip;
+    Button btnCrossPresetSave, btnCrossPresetAdd;
+    List<CrosshairPreset> crossPresets = CrosshairPreset.CreateDefaultPresets();
+    int activeCrossPresetIdx = 0;
+    bool closeToTrayOn = false;
+    bool trayHintShown = false;
+    bool allowRealExit = false;
+    CheckBox chkCloseToTray;
+    NotifyIcon trayIcon;
+    ContextMenuStrip trayMenu;
+    ToolStripMenuItem trayMiCross, trayMiTimer, trayMiHotkeys, trayMiPresetRoot;
+    string lastTrayText = "";
+    RxSegmentedControl segJoinMode;
     Button btnAuto;
-    TabControl tabs;
 
     bool autoOn = false;
     bool typingOn = false;
     volatile bool isClosing = false;
     public static bool IsDark = false;
     int themeMode = 2;   // 0 = 跟随系统，1 = 夜间深色，2 = 护眼浅色（默认）
-    Panel bottomBar;
-    Label lblThemeSwitch;
     Panel pTimerPanel, pTimerDiv1, pTimerDiv2;
+    TimelineCanvas timerTimeline;
+    CheckBox chkTimerCard;
     CountdownOverlay timerOverlay;
     bool timerRunning = false, timerPaused = false;
+    bool timerUseCard = false;
+    float timerPulseAlpha = 1.0f;
     DateTime timerEndAt = DateTime.MinValue, timerStartedAt = DateTime.MinValue;
     double timerPausedRemainMs = 0;
     long timerPausedElapsedMs = 0;
@@ -64,7 +80,9 @@ public partial class MainForm : Form
     bool suppressTimerCtrl = false;
     int lastAddedTriggerMode = 0;
     ToolTip timerPresetTip;
-    DateTime lastTimerTopmost = DateTime.MinValue;
+    DateTime lastOverlayTopmost = DateTime.MinValue;
+    IntPtr lastFgHwnd = IntPtr.Zero;
+    DateTime fgBoostTopmostAt = DateTime.MinValue;
     Dictionary<Control, Color> origFore = new Dictionary<Control, Color>();
     Dictionary<Control, Color> origBack = new Dictionary<Control, Color>();
     Dictionary<Button, FlatStyle> origFlatStyle = new Dictionary<Button, FlatStyle>();
@@ -88,17 +106,18 @@ public partial class MainForm : Form
 
     int[] favCount = new int[0];
     string[] favName = new string[0];
+    string[] favMap = new string[0];
+    int[] favPing = new int[0];
     int[] favMax = new int[0];
     string favPath = "";
     // ===== 关于 / 自动更新 =====
     public const string UPDATE_URL_DEFAULT = "https://rx-tools.pages.dev/version.json";
-    public const string APP_VERSION_NUM = "1.8.0";
-    public const string APP_BUILD_DATE = "2026-11-17";
+    public const string APP_EDITION_SUFFIX = "";
+    public const string APP_VERSION_NUM = "1.8.1";
+    public const string APP_BUILD_DATE = "2026-11-23";
     string updateUrl = UPDATE_URL_DEFAULT;
-    TabPage aboutPage, spacerPage, customPage;
+    Control aboutPage, customPage, settingsPage;
     string dataRootDir = "";
-    TabPage joinPage, crossPage, timerPage;
-    Label lblPlayerBarTip;
     Panel changelogHost;
     Label lblUpdState;
     string updLatestNotes = "";
@@ -106,8 +125,10 @@ public partial class MainForm : Form
     CheckBox chkAutoUpdate;
     Thread updThread;
     volatile bool updBusy;
+    volatile bool srvSyncBusy;
     string updLatestUrl = "", updLatestFallback = "", updLatestVersion = "";
     string updLatestSha = "";
+    string updLatestServersUrl = "", updLatestServersSha = "";
     bool startupCheckDone;
     bool autoUpdateOn = true;
 
@@ -129,7 +150,7 @@ public partial class MainForm : Form
             else if (c == '\n') sb.Append("\\n");
             else if (c == '\r') sb.Append("\\r");
             else if (c == '\t') sb.Append("\\t");
-            else if (c < ' ') sb.Append(' ');
+            else if (c < ' ') sb.Append("\\u" + ((int)c).ToString("x4", System.Globalization.CultureInfo.InvariantCulture));
             else sb.Append(c);
         }
         return sb.ToString();
@@ -227,7 +248,7 @@ public partial class MainForm : Form
     Panel pJoinPanel;
     RadioButton rbTapMode, rbOneIp, rbPollMode;
     BufferedListView lvSrv;
-    Button btnRefreshFav, btnCheckAll, btnUncheckAll, btnAddFav, btnPasteFav, btnDelFav, btnEditFav;
+    Button btnRefreshFav, btnSyncSrv, btnCheckAll, btnUncheckAll, btnAddFav, btnPasteFav, btnDelFav, btnEditFav;
     ContextMenuStrip cmsSrv;
     Label lblListHint, lblJoinHint, lblNewIp, lblNewAlias, lblTapGuide, lblCrossHint;
     TextBox txtNewIp, txtNewAlias;
@@ -242,6 +263,8 @@ public partial class MainForm : Form
     List<string> targets = new List<string>();
     string currentTargetAddr = "";
     IntPtr savedLayout = IntPtr.Zero;
+    IntPtr savedTempLayout = IntPtr.Zero;
+    bool notifiedInternalError = false;
     int multiIdx = 0;
     DateTime tapOcrAt = DateTime.MinValue;
     int tapOcrFail = 0;
@@ -249,11 +272,7 @@ public partial class MainForm : Form
     bool srvSortAsc = true;
 
     // ===== 可自定义热键：索引 = id-1 =====
-    bool[] prevHkDown = new bool[8];
-    bool[] hkRegistered = new bool[12];   // 1..8 = 功能热键，9 = 热键总开关
-    bool hotkeysOff;                     // 用户临时关闭热键（F5 等交还系统）
-    DateTime lastHkRetry = DateTime.MinValue;
-    Button btnHotkeyOff;
+    const int HK_COUNT = 8;
     static readonly int[] HKDefVk = { 0x74, 0x75, 0x76, 0x77, 0x7A, 0x78, 0x79, 0x78 };
     static readonly int[] HKDefMod = { 0, 0, 0, 0, 0x0002, 0, 0, 0x0002 };
     static readonly string[] HKFunc = {
@@ -270,8 +289,13 @@ public partial class MainForm : Form
         "显示或隐藏屏幕倒计时悬浮窗",
         "暂停或继续当前倒计时"
     };
-    int[] hkVk = new int[8];
-    int[] hkMod = new int[8];
+    bool[] prevHkDown = new bool[HK_COUNT];
+    bool[] hkRegistered = new bool[14];   // 1..HK_COUNT = 功能热键，HK_TOGGLE_ID = 热键总开关
+    bool hotkeysOff;                     // 用户临时关闭热键（F5 等交还系统）
+    DateTime lastHkRetry = DateTime.MinValue;
+    Button btnHotkeyOff;
+    int[] hkVk = new int[HK_COUNT];
+    int[] hkMod = new int[HK_COUNT];
     bool capturingKey = false;
     Button btnCross, btnColor, btnHotkey, bLog, btnCrossImg, btnCrossImgClear, btnCrossImgPaste;
     Label lblCrossImg;
@@ -283,6 +307,34 @@ public partial class MainForm : Form
 
     static readonly string[] GameProcs = { "gmod", "gmod_win64" };
     static readonly object[] TapIntervals = { "100 ms", "200 ms", "300 ms", "500 ms", "900 ms" };
+
+    public void NotifyInternalError()
+    {
+        if (notifiedInternalError) return;
+        notifiedInternalError = true;
+        SafeBeginInvoke(delegate
+        {
+            try { if (toast != null) toast.ShowText("发生内部错误，详情已写入 rx.log（点右上角“查看日志”可查看）"); }
+            catch { }
+        });
+    }
+
+    bool IsHotkeyPollAllowed()
+    {
+        try
+        {
+            IntPtr fg = Native.GetForegroundWindow();
+            if (fg == IntPtr.Zero) return false;
+            if (fg == Handle) return true;
+            using (var cur = System.Diagnostics.Process.GetCurrentProcess())
+            {
+                if (Native.PidOf(fg) == cur.Id) return true;
+            }
+            string fp = Native.ForegroundProcess();
+            return Array.IndexOf(GameProcs, fp) >= 0;
+        }
+        catch { return false; }
+    }
 
     Font TrackFont(string family, float size, FontStyle style)
     {
@@ -314,6 +366,11 @@ public partial class MainForm : Form
 
     protected override void WndProc(ref Message m)
     {
+        if (m.Msg == Native.WM_RX_WAKE)
+        {
+            RestoreFromTray();
+            return;
+        }
         if (m.Msg == 0x0312)   // WM_HOTKEY
         {
             int id = m.WParam.ToInt32();
@@ -322,7 +379,7 @@ public partial class MainForm : Form
             if (capturingKey) return;
             if (id == HK_TOGGLE_ID) { ToggleHotkeys(); return; }
             if (hotkeysOff) return;          // 已关闭：忽略其余热键（其实已注销，这里兜底）
-            if (id >= 1 && id <= 8) { HandleHotkey(id); return; }
+            if (id >= 1 && id <= HK_COUNT) { HandleHotkey(id); return; }
         }
         if (m.Msg == 0x001A && themeMode == 0)   // WM_SETTINGCHANGE（系统深浅色切换时联动）
         {
@@ -343,8 +400,9 @@ public partial class MainForm : Form
                 if (!isClosing && !IsDisposed && IsHandleCreated)
                 {
                     PerformLayout();
-                    if (tabs != null && tabs.SelectedTab != null)
-                        tabs.SelectedTab.PerformLayout();
+                    Control activePage;
+                    if (navPages != null && !string.IsNullOrEmpty(activeNavKey) && navPages.TryGetValue(activeNavKey, out activePage) && activePage != null)
+                        activePage.PerformLayout();
                     Invalidate(true);
                 }
             }
@@ -357,7 +415,7 @@ public partial class MainForm : Form
     public MainForm(string icoPath, string[] tabTitles, string[][] tabItems, string dataDir)
     {
         AutoScaleMode = AutoScaleMode.None;
-        Text = "RX 工具箱 " + APP_VERSION;
+        Text = "RX 工具箱 " + APP_VERSION + APP_EDITION_SUFFIX;
         FormBorderStyle = FormBorderStyle.Sizable;
         MaximizeBox = true;
         StartPosition = FormStartPosition.CenterScreen;
@@ -375,7 +433,7 @@ public partial class MainForm : Form
         }
         catch { }
 
-        for (int i = 0; i < 8; i++)
+        for (int i = 0; i < HK_COUNT; i++)
         {
             hkVk[i] = HKDefVk[i];
             hkMod[i] = HKDefMod[i];
@@ -394,104 +452,29 @@ public partial class MainForm : Form
         timerOverlay = new CountdownOverlay();
         toast = new Toast();
 
-        bottomBar = new Panel();
-        bottomBar.Dock = DockStyle.Bottom;
-        bottomBar.Height = 32;
-        bottomBar.Padding = new Padding(0, 1, 0, 0);
-        bottomBar.BackColor = Color.FromArgb(241, 245, 249);
-        bottomBar.Paint += delegate(object snd, PaintEventArgs pe)
-        {
-            using (var pen = new Pen(IsDark ? Color.FromArgb(48, 54, 61) : Color.FromArgb(226, 232, 240)))
-                pe.Graphics.DrawLine(pen, 0, 0, bottomBar.Width, 0);
-        };
-
-        lblThemeSwitch = new Label();
-        lblThemeSwitch.Dock = DockStyle.Right;
-        lblThemeSwitch.Width = 160;
-        lblThemeSwitch.Padding = new Padding(0, 0, 10, 0);
-        lblThemeSwitch.TextAlign = ContentAlignment.MiddleRight;
-        lblThemeSwitch.UseMnemonic = false;
-        lblThemeSwitch.Cursor = Cursors.Hand;
-        lblThemeSwitch.BackColor = Color.FromArgb(241, 245, 249);
-        lblThemeSwitch.ForeColor = Color.FromArgb(37, 99, 235);
-        lblThemeSwitch.Font = TrackFont("Microsoft YaHei UI", 8.5f, FontStyle.Regular);
-        lblThemeSwitch.Click += delegate
-        {
-            themeMode = (themeMode + 1) % 3;
-            ApplyTheme();
-            SaveSettings();
-        };
-        var tipTheme = new ToolTip(uiComponents);
-        tipTheme.InitialDelay = 300;
-        tipTheme.SetToolTip(lblThemeSwitch, "单击切换主题：护眼浅色 / 跟随系统 / 夜间深色");
-
-        lblStatus = new Label();
-        lblStatus.Dock = DockStyle.Fill;
-        lblStatus.Padding = new Padding(10, 0, 0, 0);
-        lblStatus.TextAlign = ContentAlignment.MiddleLeft;
-        lblStatus.AutoEllipsis = true;
-        lblStatus.UseMnemonic = false;
-        lblStatus.BackColor = Color.FromArgb(241, 245, 249);
-        lblStatus.ForeColor = Color.FromArgb(51, 65, 85);
-
-        bottomBar.Controls.Add(lblStatus);
-        bottomBar.Controls.Add(lblThemeSwitch);
-        lblStatus.BringToFront();
-
-        tabs = new ThemedTabControl();
-        tabs.Dock = DockStyle.Fill;
-        Controls.Add(tabs);
-        Controls.Add(bottomBar);
-
-        BuildPlayerToolPages();
-        customPage = BuildCustomPage();
-        tabs.TabPages.Add(customPage);
-        aboutPage = BuildAboutPage();
-        spacerPage = new TabPage("");
-        tabs.TabPages.Add(spacerPage);          // 只占宽度，把「关于」推到最右侧
-        tabs.TabPages.Add(aboutPage);
-        tabs.Selecting += delegate(object s2, TabControlCancelEventArgs e2)
-        {
-            if (e2.TabPage == spacerPage) e2.Cancel = true;   // 空白页不可选中
-        };
-        tabs.Resize += delegate { LayoutAboutTab(); };
-        // TabPage 在首次显示前拿到的尺寸不准，切到工具页时重排一次
-        tabs.SelectedIndexChanged += delegate
-        {
-            UpdatePlayerToolBar();
-            LayoutToolBar();
-            if (pJoinPanel != null && pJoinPanel.Visible)
-            {
-                try { LayoutJoin(); } catch { }
-            }
-            if (pTimerPanel != null && pTimerPanel.Visible)
-            {
-                try { LayoutTimer(); } catch { }
-            }
-        };
+        BuildPlayerShell();
 
         LoadSettings();
+        InitTrayIcon();
+        UpdateTrayIconVisibility();
+        SyncCrossPresetUiState();
+        if (navRail != null) navRail.SetCollapsed(navRailCollapsed);
         ApplyTheme();
-        // 设置里带着勾选偏好，读完重建列表（否则界面还是构造时默认的全选）
         FillSrvList();
         ApplyModeUi();
         UpdateHotkeyLabels();
         if (!string.IsNullOrEmpty(crossImgToLoad)) LoadCrosshairImage(crossImgToLoad, true);
-        // 构造期有控件抢焦点会让 TabControl 自己切换页签，这里强制回到首页
-        try
-        {
-            if (tabs != null && tabs.TabPages.Count > 0
-                && string.IsNullOrEmpty(Environment.GetEnvironmentVariable("RX_START_TAB")))
-                tabs.SelectedIndex = 0;
-        }
-        catch { }
 
         string startTab = Environment.GetEnvironmentVariable("RX_START_TAB");
         if (!string.IsNullOrEmpty(startTab))
         {
             int si;
-            if (int.TryParse(startTab, out si) && si >= 0 && si < tabs.TabPages.Count)
-                tabs.SelectedIndex = si;
+            if (navPages.ContainsKey(startTab)) SwitchNavPage(startTab);
+            else if (int.TryParse(startTab, out si))
+            {
+                string[] numMap = { "join", "cross", "timer", "custom", "about", "settings" };
+                if (si >= 0 && si < numMap.Length) SwitchNavPage(numMap[si]);
+            }
         }
 
         tick = new System.Windows.Forms.Timer();
@@ -528,7 +511,6 @@ public partial class MainForm : Form
             if (string.IsNullOrEmpty(body)) return;
             if (TrySetClipboardText(body))
             {
-                savedClipboardText = body;
                 toast.ShowText("已复制：" + title);
                 Native.Log("copy: " + title + " | " + body);
             }
@@ -565,14 +547,6 @@ public partial class MainForm : Form
 
 
     // ===================== 主题系统（跟随系统 / 夜间深色 / 护眼浅色） =====================
-    void UpdateThemeSwitchLabel()
-    {
-        if (lblThemeSwitch == null) return;
-        if (themeMode == 0) lblThemeSwitch.Text = IsDark ? "🌓 主题：跟随系统(暗)" : "🌓 主题：跟随系统(亮)";
-        else if (themeMode == 1) lblThemeSwitch.Text = "🌙 主题：夜间深色";
-        else lblThemeSwitch.Text = "☀ 主题：护眼浅色";
-    }
-
 
     void HookDarkScrollBar(Control c)
     {
@@ -655,12 +629,9 @@ public partial class MainForm : Form
         Color darkBlue = Color.FromArgb(88, 166, 255);
         Color darkDivider = Color.FromArgb(48, 54, 61);
 
-        if (root is CrosshairPreview)
-        {
-            root.Invalidate();
-            return;
-        }
-        if (root is WrapList)
+        if (root is CrosshairPreview || root is WrapList || root is NavRail || root is RxSegmentedControl
+            || root is TimelineCanvas || root is StatusPillBar || root is CustomPhraseCard
+            || root is CrosshairPresetStrip)
         {
             root.Invalidate();
             return;
@@ -683,6 +654,12 @@ public partial class MainForm : Form
         {
             root.BackColor = IsDark ? Color.FromArgb(46, 33, 18) : Color.FromArgb(255, 246, 229);
             root.ForeColor = IsDark ? Color.FromArgb(227, 179, 65) : Color.FromArgb(166, 56, 12);
+        }
+        else if (root is Panel && Convert.ToString(root.Tag) == "rx-surface-card")
+        {
+            root.BackColor = ThemePalette.SurfaceAlt;
+            root.ForeColor = ThemePalette.TextPrimary;
+            root.Invalidate();
         }
         else if (root is Panel && !(root is FlowLayoutPanel) && root.Height <= 2 && root.Controls.Count == 0)
         {
@@ -818,10 +795,7 @@ public partial class MainForm : Form
                 }
                 else
                 {
-                    if (root == lblStatus || root == lblThemeSwitch)
-                        root.BackColor = darkPanelBg;
-                    else
-                        root.BackColor = Color.Transparent;
+                    root.BackColor = Color.Transparent;
 
                     if (lnk != null)
                     {
@@ -829,10 +803,6 @@ public partial class MainForm : Form
                         lnk.VisitedLinkColor = darkBlue;
                         lnk.ActiveLinkColor = Color.FromArgb(121, 192, 255);
                         lnk.ForeColor = darkText;
-                    }
-                    else if (root == lblThemeSwitch)
-                    {
-                        root.ForeColor = Color.FromArgb(121, 192, 255);
                     }
                     else if (of.R > 140 && of.B < 50)
                     {
@@ -858,7 +828,7 @@ public partial class MainForm : Form
             }
             else
             {
-                if (root == lblTapGuide || root == lblStatus || root == lblThemeSwitch)
+                if (root == lblTapGuide)
                     root.BackColor = ob;
                 else if (ob == Color.White || ob == Color.FromArgb(250, 251, 253) || ob == Color.FromArgb(247, 249, 252)
                     || ob == Color.FromArgb(242, 246, 252) || ob == Color.Transparent)
@@ -884,17 +854,27 @@ public partial class MainForm : Form
         IsDark = (themeMode == 1) || (themeMode == 0 && Native.IsSystemDarkMode());
         if (IsHandleCreated) Native.SetDarkTitleBar(Handle, IsDark);
 
-        BackColor = IsDark ? Color.FromArgb(13, 17, 23) : Color.FromArgb(241, 245, 249);
-        if (bottomBar != null) bottomBar.BackColor = IsDark ? Color.FromArgb(28, 33, 40) : Color.FromArgb(241, 245, 249);
+        BackColor = ThemePalette.Canvas;
 
         ThemeControlTree(this);
-        UpdatePlayerToolBar();
+        if (headerBar != null)
+        {
+            headerBar.BackColor = ThemePalette.Surface;
+            headerBar.Invalidate();
+        }
+        if (lblHeaderTitle != null) lblHeaderTitle.ForeColor = ThemePalette.TextPrimary;
+        if (lblHeaderSub != null) lblHeaderSub.ForeColor = ThemePalette.TextMuted;
+        if (pageHost != null) pageHost.BackColor = ThemePalette.Surface;
+        if (navRail != null) navRail.Invalidate();
+        if (statusPillBar != null) statusPillBar.Invalidate();
+        if (playerRightHost != null) playerRightHost.BackColor = ThemePalette.Canvas;
+        if (segJoinMode != null) segJoinMode.Invalidate();
+        if (timerTimeline != null) timerTimeline.Invalidate();
 
         UpdateStartButton();
         UpdateHotkeyToggleButton();
         UpdateTimerButtonsStyle();
         UpdateTimerUi();
-        UpdateThemeSwitchLabel();
 
         if (lvSrv != null)
         {
@@ -908,6 +888,8 @@ public partial class MainForm : Form
             lvTimerChain.RefreshTheme();
         }
         RenderChangelog();
+        SyncCrossPresetUiState();
+        SyncSettingsPageUi();
         RefreshUi(true);
         Invalidate(true);
     }
@@ -979,6 +961,7 @@ public partial class MainForm : Form
         if (lblCrossImg != null)
             lblCrossImg.Text = "自定义准星：" + System.IO.Path.GetFileName(path)
                 + "（原图 " + bmp.Width + "×" + bmp.Height + "，可通过“臂长+间隙”调整大小）";
+        SyncCrossPresetUiState();
         SaveSettings();
         RefreshUi(true);
         Native.Log("crosshair image: " + path);
@@ -1000,7 +983,10 @@ public partial class MainForm : Form
                 toast.ShowText("剪贴板里的图片读不出来");
                 return;
             }
-            string dir = System.IO.Path.GetDirectoryName(Application.ExecutablePath);
+            string dir = !string.IsNullOrEmpty(dataRootDir)
+                ? dataRootDir
+                : System.IO.Path.GetDirectoryName(Application.ExecutablePath);
+            if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
             string save = System.IO.Path.Combine(dir, "crosshair.png");
             string tmp = save + ".tmp";
             try
@@ -1008,8 +994,15 @@ public partial class MainForm : Form
                 img.Save(tmp, System.Drawing.Imaging.ImageFormat.Png);   // 原图带 alpha 存盘
             }
             finally { img.Dispose(); }
-            if (File.Exists(save)) File.Delete(save);
-            File.Move(tmp, save);
+            if (File.Exists(save))
+            {
+                try { File.Replace(tmp, save, null); }
+                catch { File.Delete(save); File.Move(tmp, save); }
+            }
+            else
+            {
+                File.Move(tmp, save);
+            }
             Native.Log("crosshair paste -> " + save);
             LoadCrosshairImage(save, false);
         }
@@ -1033,6 +1026,7 @@ public partial class MainForm : Form
         overlay.Invalidate();
         if (crossPreview != null) crossPreview.Invalidate();
         if (lblCrossImg != null) lblCrossImg.Text = "当前用内置矢量样式（可导入 PNG 做自定义准星）";
+        SyncCrossPresetUiState();
         SaveSettings();
         RefreshUi(true);
         toast.ShowText("已清除自定义准星图片");
@@ -1051,8 +1045,7 @@ public partial class MainForm : Form
             else
             {
                 overlay.Visible = true;
-                Native.MakeTopmost(overlay.Handle);
-                Native.CenterPhysical(overlay.Handle);
+                overlay.CenterAndRedraw();
                 toast.ShowText("准星：开启");
                 Native.Log("cross show");
             }
@@ -1066,7 +1059,6 @@ public partial class MainForm : Form
         if (!force && (DateTime.Now - lastUi).TotalMilliseconds < 400) return;
         lastUi = DateTime.Now;
         int m = JoinModeIdx;
-        string modeName = (m == 0) ? "手动档" : ((m == 2) ? "收藏轮询" : "单一 IP");
 
         string tg;
         if (autoOn && typingOn && targets != null && targets.Count > 0)
@@ -1091,11 +1083,6 @@ public partial class MainForm : Form
             tg = selAddr.Length > 0 ? selAddr : "未选服";
         }
 
-        string run;
-        if (!autoOn) run = "已停止";
-        else if (typingOn) run = "粘贴中";
-        else run = "回车中";
-
         // 挤服进行中：顶部常驻提醒（含当前热键），停止后自动收起
         if (autoOn || typingOn)
         {
@@ -1109,19 +1096,14 @@ public partial class MainForm : Form
             toast.HideIfPersistent();
         }
 
-        string ocr = (chkOcr == null || chkOcr.Checked) ? "OCR开" : "OCR关";
-        lblStatus.Text = string.Format("准星：{0} ({1})　|　挤服：{2} [{3} · {4} · {5}ms]　|　{6}　|　热键{7}　|　已发送 {8} 次",
-            overlay.Visible ? "开启" : "关闭",
-            Overlay.Styles[overlay.StyleIndex],
-            run, modeName, tg, IntervalMs, ocr,
-            hotkeysOff ? "关(" + ToggleKeyName() + "开)"
-                : (HotkeysOk() ? "开" : "冲突"), sent);
+        UpdatePlayerStatusPills();
+        UpdateHeaderBar();
+        UpdateTrayTooltip();
     }
 
     void OnTick(object sender, EventArgs e)
     {
-        // 窗口/面板尺寸变了就重排（构造期布局用的是临时尺寸，常常对不上）
-        if (pJoinPanel != null && !isClosing
+        if (pJoinPanel != null && pJoinPanel.Visible && !isClosing
             && (pJoinPanel.ClientSize.Width != laidW || pJoinPanel.ClientSize.Height != laidH))
             LayoutJoin();
 
@@ -1142,15 +1124,11 @@ public partial class MainForm : Form
             }
         }
 
-        if (pJoinPanel != null && !isClosing
-            && (pJoinPanel.ClientSize.Width != laidW || pJoinPanel.ClientSize.Height != laidH))
-            LayoutJoin();
-
         // 注册失败时每 5 秒重试一次（可能被别的程序临时占用）
         if (!hotkeysOff && !capturingKey && (DateTime.Now - lastHkRetry).TotalSeconds > 5)
         {
             bool missing = false;
-            for (int i = 1; i <= 8; i++) if (!hkRegistered[i]) { missing = true; break; }
+            for (int i = 1; i <= HK_COUNT; i++) if (!hkRegistered[i]) { missing = true; break; }
             if (missing)
             {
                 lastHkRetry = DateTime.Now;
@@ -1160,20 +1138,25 @@ public partial class MainForm : Form
         }
 
         // 动态热键轮询兜底（抓键弹窗期间严禁触发；用户关掉热键时也不许轮询）
+        bool anyUnreg = false;
         if (!capturingKey && !hotkeysOff)
         {
-            for (int hi = 0; hi < 8; hi++)
+            for (int hi = 0; hi < HK_COUNT; hi++)
             {
                 int id = hi + 1;
                 if (!hkRegistered[id])
                 {
+                    anyUnreg = true;
                     bool down = IsHotkeyDown(hkVk[hi], hkMod[hi]);
                     if (down && !prevHkDown[hi])
                     {
                         prevHkDown[hi] = true;
-                        Native.Log("POLL_HOTKEY id=" + id + " fg=" + ForegroundTitle());
-                        HandleHotkey(id);
-                        if (id == 5) return;
+                        if (IsHotkeyPollAllowed())
+                        {
+                            Native.Log("POLL_HOTKEY id=" + id + " fg=" + ForegroundTitle());
+                            HandleHotkey(id);
+                            if (id == 5) return;
+                        }
                     }
                     else if (!down)
                     {
@@ -1196,6 +1179,7 @@ public partial class MainForm : Form
                 timerPaused = false;
                 timerRemainSec = 0;
                 timerFlashDim = false;
+                timerPulseAlpha = 1.0f;
                 EvaluateCurrentTimeline();
                 SyncTimerOverlay(false);
                 UpdateTimerButtonsStyle();
@@ -1210,30 +1194,34 @@ public partial class MainForm : Form
                     EvaluateCurrentTimeline();
                 }
                 bool wantDim = false;
-                if (timerActiveFlash == 1)
+                float wantPulse = 1.0f;
+                if (timerActiveFlash > 0)
                 {
-                    long elapsedMs = (long)(DateTime.Now - timerStartedAt).TotalMilliseconds;
-                    if (elapsedMs >= 0) wantDim = ((elapsedMs % 2000) >= 1500);
+                    double periodMs = (timerActiveFlash == 3) ? 360.0 : ((timerActiveFlash == 2) ? 900.0 : 2000.0);
+                    double elapsedMs = Math.Max(0.0, (DateTime.Now - timerStartedAt).TotalMilliseconds);
+                    double phase = (elapsedMs % periodMs) / periodMs;
+                    // 平滑正弦呼吸脉冲：0.30..1.00
+                    wantPulse = (float)(0.65 + 0.35 * Math.Cos(phase * Math.PI * 2.0));
+                    wantDim = (wantPulse < 0.55f);
                 }
-                else if (timerActiveFlash == 2 || timerActiveFlash == 3)
+                bool pulseChanged = (Math.Abs(wantPulse - timerPulseAlpha) >= 0.008f) || (wantDim != timerFlashDim);
+                if (secChanged || pulseChanged)
                 {
-                    int halfMs = (timerActiveFlash == 3) ? 180 : 450;
-                    long elapsedMs = (long)(DateTime.Now - timerStartedAt).TotalMilliseconds;
-                    if (elapsedMs >= 0) wantDim = ((elapsedMs / halfMs) % 2) == 1;
+                    timerFlashDim = wantDim;
+                    timerPulseAlpha = wantPulse;
                 }
-                bool flashChanged = (wantDim != timerFlashDim);
-                timerFlashDim = wantDim;
 
                 if (secChanged)
                 {
                     SyncTimerOverlay(false);
                     UpdateTimerUi();
                 }
-                else if (flashChanged)
+                else if (pulseChanged)
                 {
                     if (timerOverlay != null)
                     {
                         timerOverlay.FlashDim = timerFlashDim;
+                        timerOverlay.PulseAlpha = timerPulseAlpha;
                         timerOverlay.Invalidate();
                     }
                     UpdateTimerFlashPreview();
@@ -1241,10 +1229,32 @@ public partial class MainForm : Form
             }
         }
 
-        if (timerOverlay != null && timerOverlay.Visible && (DateTime.Now - lastTimerTopmost).TotalSeconds >= 2.0)
+        bool needOverlay = (overlay != null && overlay.Visible);
+        bool needTimer = (timerOverlay != null && timerOverlay.Visible);
+        if (needOverlay || needTimer)
         {
-            lastTimerTopmost = DateTime.Now;
-            try { Native.MakeTopmost(timerOverlay.Handle); } catch { }
+            DateTime now = DateTime.Now;
+            IntPtr fg = Native.GetForegroundWindow();
+            if (fg != lastFgHwnd)
+            {
+                lastFgHwnd = fg;
+                fgBoostTopmostAt = now.AddMilliseconds(220);
+            }
+            bool boostDue = (fgBoostTopmostAt != DateTime.MinValue && now >= fgBoostTopmostAt);
+            if (boostDue) fgBoostTopmostAt = DateTime.MinValue;
+            if (boostDue || (now - lastOverlayTopmost).TotalSeconds >= 2.0)
+            {
+                lastOverlayTopmost = now;
+                if (needOverlay) { try { overlay.CenterAndRedraw(); } catch { } }
+                if (needTimer) { try { Native.MakeTopmost(timerOverlay.Handle); } catch { } }
+            }
+        }
+
+        // 动态节能频率：空闲时 160ms，有活动挤服/倒计时/悬浮窗/轮询热键时保持 20ms 高响应
+        if (tick != null)
+        {
+            int wantInterval = (autoOn || timerRunning || needOverlay || needTimer || anyUnreg) ? 20 : 160;
+            if (tick.Interval != wantInterval) tick.Interval = wantInterval;
         }
 
         if (autoOn)
@@ -1254,11 +1264,16 @@ public partial class MainForm : Form
                 if ((DateTime.Now - lastEnter).TotalMilliseconds >= IntervalMs)
                 {
                     string fgOld = Native.ForegroundProcess();
-                    if (Array.IndexOf(GameProcs, fgOld) >= 0)
+                    if (Array.IndexOf(GameProcs, fgOld) >= 0 && Interlocked.CompareExchange(ref pasteBusy, 1, 0) == 0)
                     {
-                        Native.PressEnter();
                         lastEnter = DateTime.Now;
                         sent++;
+                        ThreadPool.QueueUserWorkItem(delegate
+                        {
+                            try { Native.PressEnter(); }
+                            catch { }
+                            finally { Interlocked.Exchange(ref pasteBusy, 0); }
+                        });
                     }
                 }
             }
@@ -1322,9 +1337,11 @@ public partial class MainForm : Form
         Native.ShowWindow(Handle, 5);
         try
         {
-            if (tabs != null) { tabs.PerformLayout(); LayoutAboutTab(); }
+            if (pageHost != null) pageHost.PerformLayout();
+            LayoutHeaderBar();
             LayoutToolBar();
             if (pJoinPanel != null) LayoutJoin();
+            LayoutCrossPanel();
             if (pTimerPanel != null) LayoutTimer();
         }
         catch { }
@@ -1338,8 +1355,29 @@ public partial class MainForm : Form
 
         if (!hotkeysOff && !HotkeysOk())
         {
-            Native.Log("hotkeys conflict: another instance or app holds hotkeys");
-            try { if (toast != null) toast.ShowText("部分热键被占用：可打开“热键设置”查看或修改按键"); } catch { }
+            bool otherEd = Program.IsOtherEditionRunning();
+            Native.Log(otherEd
+                ? "hotkeys conflict: opposite edition is running"
+                : "hotkeys conflict: another instance or app holds hotkeys");
+            try
+            {
+                if (toast != null)
+                {
+                    toast.ShowText(otherEd
+                        ? "另一个版本的 RX 工具箱正在运行，部分全局热键已被占用"
+                        : "部分热键被占用：可打开“热键设置”查看或修改按键");
+                }
+            }
+            catch { }
+        }
+        if (Program.AfterUpdate)
+        {
+            try
+            {
+                string exeDir = AppDomain.CurrentDomain.BaseDirectory;
+                CleanupUpdateArtifacts(Application.ExecutablePath, "", true);
+            }
+            catch { }
         }
         // 启动后自动刷一次服务器状态（人数 + 真实名），失败的再串行补查一遍
         if (favList.Length > 0)
@@ -1359,7 +1397,6 @@ public partial class MainForm : Form
             bootTimer.Start();
         }
         if (Environment.GetEnvironmentVariable("RX_DUMP_UI") == "1") DumpUi();
-        UpdatePlayerToolBar();
         // 启动后静默检查更新（失败不打扰）
         if (autoUpdateOn && !startupCheckDone)
         {
@@ -1378,6 +1415,144 @@ public partial class MainForm : Form
         Native.Log("shown");
     }
 
+    void InitTrayIcon()
+    {
+        if (trayIcon != null) return;
+        trayMenu = new ContextMenuStrip(uiComponents);
+        var miShow = new ToolStripMenuItem("显示主窗口", null, delegate { RestoreFromTray(); });
+        miShow.Font = TrackFont("Microsoft YaHei UI", 9f, FontStyle.Bold);
+        trayMenu.Items.Add(miShow);
+        trayMenu.Items.Add(new ToolStripSeparator());
+
+        trayMiCross = new ToolStripMenuItem("屏幕准星 (" + KeyName(4) + ")", null, delegate { ToggleCross(); });
+        trayMenu.Items.Add(trayMiCross);
+
+        trayMiPresetRoot = new ToolStripMenuItem("切换准星方案");
+        trayMenu.Items.Add(trayMiPresetRoot);
+
+        trayMiTimer = new ToolStripMenuItem("倒计时悬浮窗 (" + KeyName(7) + ")", null, delegate { ToggleCountdownOverlay(); });
+        trayMenu.Items.Add(trayMiTimer);
+
+        trayMiHotkeys = new ToolStripMenuItem("关闭全局热键", null, delegate { ToggleHotkeys(); });
+        trayMenu.Items.Add(trayMiHotkeys);
+
+        trayMenu.Items.Add(new ToolStripSeparator());
+        trayMenu.Items.Add("彻底退出", null, delegate { ExitAppReal(); });
+
+        trayMenu.Opening += delegate
+        {
+            if (trayMiCross != null)
+            {
+                trayMiCross.Text = "屏幕准星 (" + KeyName(4) + ")";
+                trayMiCross.Checked = (overlay != null && overlay.Visible);
+            }
+            if (trayMiTimer != null)
+            {
+                trayMiTimer.Text = "倒计时悬浮窗 (" + KeyName(7) + ")";
+                trayMiTimer.Checked = (timerOverlay != null && timerOverlay.Visible);
+            }
+            if (trayMiHotkeys != null)
+            {
+                trayMiHotkeys.Text = hotkeysOff
+                    ? ("恢复全局热键 (" + ToggleKeyName() + ")")
+                    : ("关闭全局热键 (" + ToggleKeyName() + ")");
+            }
+            if (trayMiPresetRoot != null)
+            {
+                trayMiPresetRoot.DropDownItems.Clear();
+                if (crossPresets != null)
+                {
+                    for (int i = 0; i < crossPresets.Count; i++)
+                    {
+                        int pidx = i;
+                        var sub = new ToolStripMenuItem(crossPresets[i].Name, null, delegate { ApplyCrossPreset(pidx, false); });
+                        sub.Checked = (pidx == activeCrossPresetIdx && crossPresets[i].MatchesOverlay(overlay));
+                        trayMiPresetRoot.DropDownItems.Add(sub);
+                    }
+                }
+            }
+        };
+
+        trayIcon = new NotifyIcon(uiComponents);
+        trayIcon.Icon = Icon != null ? Icon : SystemIcons.Application;
+        trayIcon.ContextMenuStrip = trayMenu;
+        trayIcon.MouseClick += delegate(object snd, MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Left) RestoreFromTray();
+        };
+        UpdateTrayTooltip();
+    }
+
+    void UpdateTrayIconVisibility()
+    {
+        if (trayIcon == null) return;
+        bool want = closeToTrayOn || !Visible;
+        if (trayIcon.Visible != want)
+        {
+            try { trayIcon.Visible = want; } catch { }
+        }
+    }
+
+    void UpdateTrayTooltip()
+    {
+        if (trayIcon == null) return;
+        string txt = "RX 工具箱 " + APP_VERSION;
+        if (overlay != null && overlay.Visible) txt += " · 准星开";
+        if (timerOverlay != null && timerOverlay.Visible) txt += " · 倒计时开";
+        if (autoOn || typingOn) txt += " · 挤服中";
+        if (txt.Length > 63) txt = txt.Substring(0, 62) + "…";
+        if (txt != lastTrayText)
+        {
+            lastTrayText = txt;
+            try { trayIcon.Text = txt; } catch { }
+        }
+    }
+
+    void HideToTray()
+    {
+        if (isClosing || IsDisposed) return;
+        InitTrayIcon();
+        Hide();
+        UpdateTrayIconVisibility();
+        UpdateTrayTooltip();
+        if (!trayHintShown)
+        {
+            trayHintShown = true;
+            if (toast != null)
+                toast.ShowText("已缩进系统托盘：单击右下角图标恢复，右键可彻底退出");
+        }
+    }
+
+    void RestoreFromTray()
+    {
+        if (isClosing || IsDisposed) return;
+        if (!Visible) Show();
+        if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
+        Native.ShowWindow(Handle, 5);
+        Activate();
+        Native.SetForegroundWindow(Handle);
+        Native.SetDarkTitleBar(Handle, IsDark);
+        UpdateTrayIconVisibility();
+        LayoutCrossPanel();
+    }
+
+    void ExitAppReal()
+    {
+        allowRealExit = true;
+        Close();
+    }
+
+    protected override void OnFormClosing(FormClosingEventArgs e)
+    {
+        if (e.CloseReason == CloseReason.UserClosing && closeToTrayOn && !allowRealExit && !isClosing)
+        {
+            e.Cancel = true;
+            HideToTray();
+            return;
+        }
+        base.OnFormClosing(e);
+    }
+
     protected override void OnFormClosed(FormClosedEventArgs e)
     {
         isClosing = true;
@@ -1387,12 +1562,23 @@ public partial class MainForm : Form
                 StopActiveJoin(null, "close: stop active join");
         }
         catch { }
-        for (int id = 1; id <= 8; id++)
+        for (int id = 1; id <= HK_COUNT; id++)
         {
             try { if (hkRegistered[id]) Native.UnregisterHotKey(Handle, id); } catch { }
         }
         try { if (hkRegistered[HK_TOGGLE_ID]) Native.UnregisterHotKey(Handle, HK_TOGGLE_ID); } catch { }
         SaveSettings();
+        try
+        {
+            if (trayIcon != null)
+            {
+                trayIcon.Visible = false;
+                trayIcon.Dispose();
+                trayIcon = null;
+            }
+        }
+        catch { }
+        try { if (trayMenu != null) { trayMenu.Dispose(); trayMenu = null; } } catch { }
         try { if (tick != null) { tick.Stop(); tick.Dispose(); tick = null; } } catch (Exception ex) { Native.Log("tick dispose: " + ex.Message); }
         try { if (uiComponents != null) { uiComponents.Dispose(); uiComponents = null; } } catch { }
         try { if (toast != null) { toast.Close(); toast.Dispose(); toast = null; } } catch { }

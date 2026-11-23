@@ -31,6 +31,8 @@ public static class Native
     [DllImport("kernel32.dll")]
     static extern IntPtr GetCurrentProcess();
     [DllImport("kernel32.dll")]
+    static extern uint GetCurrentThreadId();
+    [DllImport("kernel32.dll")]
     static extern bool CloseHandle(IntPtr h);
 
     // 当前进程是否以管理员身份运行
@@ -55,24 +57,58 @@ public static class Native
     [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
     [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
     [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+    [DllImport("user32.dll")] static extern bool BringWindowToTop(IntPtr h);
+    [DllImport("user32.dll")] static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
     [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
     [DllImport("user32.dll")] static extern uint MapVirtualKeyW(uint code, uint mapType);
 
     // ===== 输入法切换（避免中文输入法吞键）=====
     [DllImport("user32.dll")] static extern IntPtr GetKeyboardLayout(uint idThread);
+    [DllImport("user32.dll")] static extern int GetKeyboardLayoutList(int nBuff, [Out] IntPtr[] lpList);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr LoadKeyboardLayoutW(string id, uint flags);
+    [DllImport("user32.dll")] static extern bool UnloadKeyboardLayout(IntPtr hkl);
 
     const uint WM_INPUTLANGCHANGEREQUEST = 0x0050;
 
+    static IntPtr FindInstalledEnglishLayout()
+    {
+        try
+        {
+            int n = GetKeyboardLayoutList(0, null);
+            if (n <= 0 || n > 64) return IntPtr.Zero;
+            var list = new IntPtr[n];
+            int got = GetKeyboardLayoutList(n, list);
+            for (int i = 0; i < got; i++)
+            {
+                uint langId = unchecked((uint)list[i].ToInt64()) & 0xFFFFu;
+                if (langId == 0x0409u) return list[i];
+            }
+        }
+        catch { }
+        return IntPtr.Zero;
+    }
+
     public static IntPtr SwitchToEnglish(IntPtr hwnd)
     {
+        IntPtr dummy;
+        return SwitchToEnglish(hwnd, out dummy);
+    }
+
+    public static IntPtr SwitchToEnglish(IntPtr hwnd, out IntPtr tempLoaded)
+    {
         IntPtr old = IntPtr.Zero;
+        tempLoaded = IntPtr.Zero;
         try
         {
             uint pid;
             uint tid = GetWindowThreadProcessId(hwnd, out pid);
             old = GetKeyboardLayout(tid);
-            IntPtr en = LoadKeyboardLayoutW("04090409", 0x00000001);
+            IntPtr en = FindInstalledEnglishLayout();
+            if (en == IntPtr.Zero)
+            {
+                en = LoadKeyboardLayoutW("04090409", 0x00000001);
+                if (en != IntPtr.Zero && en != old) tempLoaded = en;
+            }
             if (en != IntPtr.Zero) PostMessage(hwnd, WM_INPUTLANGCHANGEREQUEST, IntPtr.Zero, en);
         }
         catch { }
@@ -81,9 +117,28 @@ public static class Native
 
     public static void RestoreLayout(IntPtr hwnd, IntPtr layout)
     {
-        if (hwnd == IntPtr.Zero || layout == IntPtr.Zero) return;
-        try { PostMessage(hwnd, WM_INPUTLANGCHANGEREQUEST, IntPtr.Zero, layout); }
-        catch { }
+        RestoreLayout(hwnd, layout, IntPtr.Zero);
+    }
+
+    public static void RestoreLayout(IntPtr hwnd, IntPtr layout, IntPtr tempLoaded)
+    {
+        if (hwnd != IntPtr.Zero && layout != IntPtr.Zero)
+        {
+            try { PostMessage(hwnd, WM_INPUTLANGCHANGEREQUEST, IntPtr.Zero, layout); }
+            catch { }
+        }
+        if (tempLoaded != IntPtr.Zero && tempLoaded != layout)
+        {
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                try
+                {
+                    System.Threading.Thread.Sleep(120);
+                    UnloadKeyboardLayout(tempLoaded);
+                }
+                catch { }
+            });
+        }
     }
 
     public static void PressCtrlV()
@@ -119,6 +174,7 @@ public static class Native
 
     public struct RECT { public int L, T, R, B; }
 
+    public const int WM_RX_WAKE = 0x8001;
     static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
     static readonly object logLock = new object();
 
@@ -127,16 +183,76 @@ public static class Native
         SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010);
     }
 
+    public static void ForceForegroundWindow(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero) return;
+        IntPtr fg = GetForegroundWindow();
+        uint curTid = GetCurrentThreadId();
+        uint fgPid;
+        uint fgTid = (fg != IntPtr.Zero) ? GetWindowThreadProcessId(fg, out fgPid) : 0;
+        bool attached = false;
+        try
+        {
+            if (fgTid != 0 && fgTid != curTid)
+                attached = AttachThreadInput(curTid, fgTid, true);
+            ShowWindow(hwnd, 5); // SW_SHOW
+            MakeTopmost(hwnd);
+            BringWindowToTop(hwnd);
+            SetForegroundWindow(hwnd);
+        }
+        catch { }
+        finally
+        {
+            if (attached)
+            {
+                try { AttachThreadInput(curTid, fgTid, false); } catch { }
+            }
+        }
+    }
+
+    public static Rectangle GetTargetScreenBounds()
+    {
+        try
+        {
+            IntPtr gw = FindGameWindow();
+            if (gw != IntPtr.Zero) return Screen.FromHandle(gw).Bounds;
+        }
+        catch { }
+        try { return Screen.PrimaryScreen.Bounds; }
+        catch { return new Rectangle(0, 0, GetSystemMetrics(0), GetSystemMetrics(1)); }
+    }
+
     public static void CenterPhysical(IntPtr h)
     {
         RECT r;
         if (!GetWindowRect(h, out r)) return;
         int w = r.R - r.L, ht = r.B - r.T;
-        int sw = GetSystemMetrics(0), sh = GetSystemMetrics(1);
-        SetWindowPos(h, IntPtr.Zero, (sw - w) / 2, (sh - ht) / 2, 0, 0, 0x0001 | 0x0004 | 0x0010);
+        Rectangle scr = GetTargetScreenBounds();
+        SetWindowPos(h, IntPtr.Zero, scr.X + (scr.Width - w) / 2, scr.Y + (scr.Height - ht) / 2, 0, 0, 0x0001 | 0x0004 | 0x0010);
     }
 
     public static string LogPath = "";
+
+    static readonly Dictionary<string, long> warnTicks = new Dictionary<string, long>();
+
+    public static void LogWarn(string tag, Exception ex)
+    {
+        if (ex == null || string.IsNullOrEmpty(LogPath)) return;
+        string msg = (ex.Message ?? "").Replace('\r', ' ').Replace('\n', ' ');
+        if (msg.Length > 200) msg = msg.Substring(0, 200);
+        string t = string.IsNullOrEmpty(tag) ? "app" : tag;
+        string key = t + "|" + ex.GetType().Name + "|" + msg;
+        long now = System.Diagnostics.Stopwatch.GetTimestamp();
+        long window = System.Diagnostics.Stopwatch.Frequency * 5L;
+        lock (logLock)
+        {
+            long prev;
+            if (warnTicks.TryGetValue(key, out prev) && (now - prev) < window) return;
+            if (warnTicks.Count >= 64) warnTicks.Clear();
+            warnTicks[key] = now;
+        }
+        Log("[WARN] " + t + ": " + ex.GetType().Name + " - " + msg);
+    }
 
     public static void Log(string s)
     {
@@ -160,6 +276,40 @@ public static class Native
             }
         }
         catch { }
+    }
+
+    public static long GetLogSizeBytes()
+    {
+        if (string.IsNullOrEmpty(LogPath)) return 0;
+        try
+        {
+            lock (logLock)
+            {
+                long total = 0;
+                var fi = new FileInfo(LogPath);
+                if (fi.Exists) total += fi.Length;
+                var fiOld = new FileInfo(LogPath + ".old");
+                if (fiOld.Exists) total += fiOld.Length;
+                return total;
+            }
+        }
+        catch { return 0; }
+    }
+
+    public static bool ClearLog()
+    {
+        if (string.IsNullOrEmpty(LogPath)) return false;
+        try
+        {
+            lock (logLock)
+            {
+                if (File.Exists(LogPath)) File.Delete(LogPath);
+                string bak = LogPath + ".old";
+                if (File.Exists(bak)) File.Delete(bak);
+                return true;
+            }
+        }
+        catch { return false; }
     }
 
     public static int PidOf(IntPtr h)
@@ -240,23 +390,41 @@ public static class Native
                         if (targetHwnd == IntPtr.Zero)
                         {
                             int targetPid = p.Id;
+                            IntPtr visibleTitleMatch = IntPtr.Zero;
+                            IntPtr visibleAny = IntPtr.Zero;
+                            IntPtr hiddenTitleMatch = IntPtr.Zero;
                             EnumWindows(delegate(IntPtr h, IntPtr l)
                             {
                                 uint wpid;
                                 GetWindowThreadProcessId(h, out wpid);
-                                if ((int)wpid == targetPid && IsWindowVisible(h))
+                                if ((int)wpid != targetPid) return true;
+                                var titleSb = new StringBuilder(128);
+                                GetWindowTextW(h, titleSb, titleSb.Capacity);
+                                string wt = titleSb.ToString();
+                                bool isMainTitle = wt.StartsWith("RX 工具箱", StringComparison.Ordinal);
+                                if (IsWindowVisible(h))
                                 {
-                                    targetHwnd = h;
-                                    return false;
+                                    if (isMainTitle && visibleTitleMatch == IntPtr.Zero) visibleTitleMatch = h;
+                                    if (visibleAny == IntPtr.Zero) visibleAny = h;
+                                }
+                                else if (isMainTitle && hiddenTitleMatch == IntPtr.Zero)
+                                {
+                                    hiddenTitleMatch = h;
                                 }
                                 return true;
                             }, IntPtr.Zero);
+                            targetHwnd = visibleTitleMatch != IntPtr.Zero ? visibleTitleMatch
+                                : (visibleAny != IntPtr.Zero ? visibleAny : hiddenTitleMatch);
                         }
                         if (targetHwnd != IntPtr.Zero)
                         {
-                            if (IsIconic(targetHwnd)) ShowWindow(targetHwnd, 9);
-                            else ShowWindow(targetHwnd, 5);
-                            SetForegroundWindow(targetHwnd);
+                            PostMessage(targetHwnd, (uint)WM_RX_WAKE, IntPtr.Zero, IntPtr.Zero);
+                            if (IsWindowVisible(targetHwnd))
+                            {
+                                if (IsIconic(targetHwnd)) ShowWindow(targetHwnd, 9);
+                                else ShowWindow(targetHwnd, 5);
+                                SetForegroundWindow(targetHwnd);
+                            }
                             activated = true;
                         }
                     }
@@ -331,6 +499,21 @@ public static class Native
         catch { }
     }
 
+    public static bool TrySetDwmRoundedCorners(IntPtr hwnd, Color borderColor)
+    {
+        if (hwnd == IntPtr.Zero) return false;
+        try
+        {
+            int pref = 2; // DWMWCP_ROUND (Win11 原生 8px 抗锯齿圆角与阴影)
+            if (DwmSetWindowAttribute(hwnd, 33, ref pref, 4) != 0)
+                return false;
+            int colorRef = (borderColor.B << 16) | (borderColor.G << 8) | borderColor.R;
+            DwmSetWindowAttribute(hwnd, 34, ref colorRef, 4); // DWMWA_BORDER_COLOR
+            return true;
+        }
+        catch { return false; }
+    }
+
     public static void ApplyRoundRegion(Control c, int radius)
     {
         if (c == null || c.IsDisposed || c.Width <= 0 || c.Height <= 0) return;
@@ -391,4 +574,90 @@ public static class Native
             g.DrawPath(p, path);
         g.SmoothingMode = old;
     }
+
+    // ===== 32-bit Per-Pixel Alpha 分层窗口（UpdateLayeredWindow）=====
+    [StructLayout(LayoutKind.Sequential)]
+    struct POINT_API { public int x, y; }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct SIZE_API { public int cx, cy; }
+
+    [StructLayout(LayoutKind.Sequential, Pack = 1)]
+    struct BLENDFUNCTION
+    {
+        public byte BlendOp;
+        public byte BlendFlags;
+        public byte SourceConstantAlpha;
+        public byte AlphaFormat;
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    static extern IntPtr GetDC(IntPtr hWnd);
+    [DllImport("gdi32.dll", SetLastError = true)]
+    static extern IntPtr CreateCompatibleDC(IntPtr hdc);
+    [DllImport("gdi32.dll", SetLastError = true)]
+    static extern bool DeleteDC(IntPtr hdc);
+    [DllImport("gdi32.dll", SetLastError = true)]
+    static extern IntPtr SelectObject(IntPtr hdc, IntPtr hgdiobj);
+    [DllImport("user32.dll", SetLastError = true)]
+    static extern bool UpdateLayeredWindow(
+        IntPtr hwnd, IntPtr hdcDst, ref POINT_API pptDst, ref SIZE_API psize,
+        IntPtr hdcSrc, ref POINT_API pptSrc, int crKey, ref BLENDFUNCTION pblend, int dwFlags);
+
+    const int ULW_ALPHA = 0x00000002;
+    const byte AC_SRC_OVER = 0x00;
+    const byte AC_SRC_ALPHA = 0x01;
+
+    /// <summary>
+    /// 把 32bpp Premultiplied ARGB 位图一次性提交到 WS_EX_LAYERED 窗口（每像素真 Alpha，零紫边、抗锯齿）。
+    /// </summary>
+    public static bool PushLayeredBitmap(IntPtr hwnd, Bitmap bmp, int left, int top, byte masterAlpha)
+    {
+        if (hwnd == IntPtr.Zero || bmp == null || bmp.Width <= 0 || bmp.Height <= 0) return false;
+        IntPtr screenDc = IntPtr.Zero;
+        IntPtr memDc = IntPtr.Zero;
+        IntPtr hBitmap = IntPtr.Zero;
+        IntPtr oldBmp = IntPtr.Zero;
+        try
+        {
+            screenDc = GetDC(IntPtr.Zero);
+            if (screenDc == IntPtr.Zero) return false;
+            memDc = CreateCompatibleDC(screenDc);
+            if (memDc == IntPtr.Zero) return false;
+            hBitmap = bmp.GetHbitmap(Color.FromArgb(0));
+            if (hBitmap == IntPtr.Zero) return false;
+            oldBmp = SelectObject(memDc, hBitmap);
+
+            var size = new SIZE_API { cx = bmp.Width, cy = bmp.Height };
+            var srcPt = new POINT_API { x = 0, y = 0 };
+            var dstPt = new POINT_API { x = left, y = top };
+            var blend = new BLENDFUNCTION
+            {
+                BlendOp = AC_SRC_OVER,
+                BlendFlags = 0,
+                SourceConstantAlpha = masterAlpha,
+                AlphaFormat = AC_SRC_ALPHA
+            };
+            return UpdateLayeredWindow(hwnd, screenDc, ref dstPt, ref size, memDc, ref srcPt, 0, ref blend, ULW_ALPHA);
+        }
+        catch { return false; }
+        finally
+        {
+            if (oldBmp != IntPtr.Zero && memDc != IntPtr.Zero) SelectObject(memDc, oldBmp);
+            if (hBitmap != IntPtr.Zero) DeleteObject(hBitmap);
+            if (memDc != IntPtr.Zero) DeleteDC(memDc);
+            if (screenDc != IntPtr.Zero) ReleaseDC(IntPtr.Zero, screenDc);
+        }
+    }
+
+    [DllImport("kernel32.dll", EntryPoint = "RtlMoveMemory")]
+    public static extern void CopyMemory(IntPtr dest, IntPtr src, UIntPtr count);
+}
+
+[ComImport]
+[Guid("5b0d3235-4dba-4d44-865e-8f1d0e4fd04d")]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface IMemoryBufferByteAccess
+{
+    void GetBuffer(out IntPtr buffer, out uint capacity);
 }

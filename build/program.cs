@@ -11,16 +11,30 @@ using System.Windows.Forms;
 [assembly: AssemblyProduct("RX 工具箱")]
 [assembly: AssemblyDescription("GMod 挤服助手 + 屏幕准星 + 对局倒计时 + 自定义常用文本")]
 [assembly: AssemblyCompany("RXToolbox")]
-[assembly: AssemblyVersion("1.8.0.0")]
-[assembly: AssemblyFileVersion("1.8.0.0")]
+[assembly: AssemblyVersion("1.8.1.0")]
+[assembly: AssemblyFileVersion("1.8.1.0")]
 
 static class Program
 {
     public const string TARGET_EXE_NAME = "Rx工具箱.exe";
     static bool g_dev;      // --dev 启动：多实例 + 标题带 DEV
+    static bool g_afterUpdate;
     static string g_migratedFrom = "";
     public static bool IsDev { get { return g_dev; } }
+    public static bool AfterUpdate { get { return g_afterUpdate; } }
     public static string MigratedFrom { get { return g_migratedFrom; } }
+
+    public static bool IsOtherEditionRunning()
+    {
+        string otherMutex =
+            @"Local\RXToolbox_SingleInstance_Mutex_Admin";
+        try
+        {
+            using (Mutex.OpenExisting(otherMutex))
+                return true;
+        }
+        catch { return false; }
+    }
 
     public static bool ShouldMigrateLegacyExeName(string fileName)
     {
@@ -98,6 +112,14 @@ static class Program
             string backedTarget = "";
             if (File.Exists(targetExe))
             {
+                try
+                {
+                    var curInfo = System.Diagnostics.FileVersionInfo.GetVersionInfo(exePath);
+                    var tgtInfo = System.Diagnostics.FileVersionInfo.GetVersionInfo(targetExe);
+                    if (MainForm.CompareVersion(tgtInfo.FileVersion, curInfo.FileVersion) >= 0)
+                        return false;
+                }
+                catch { }
                 backedTarget = MainForm.PickBackupPath(targetExe);
                 MainForm.MoveWithRetry(targetExe, backedTarget, 3);
             }
@@ -203,13 +225,17 @@ static class Program
 
     static void RunApp(bool afterUpdate)
     {
+        g_afterUpdate = afterUpdate;
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
         Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+        MainForm form = null;
         Application.ThreadException += delegate(object s, ThreadExceptionEventArgs e)
         {
             if (e != null && e.Exception != null)
                 Native.Log("UI ThreadException: " + e.Exception);
+            if (form != null && !form.IsDisposed)
+                form.NotifyInternalError();
         };
         AppDomain.CurrentDomain.UnhandledException += delegate(object s, UnhandledExceptionEventArgs e)
         {
@@ -236,14 +262,18 @@ static class Program
         }
 
         Native.LogPath = Path.Combine(dataDir, "rx.log");
-        MainForm.CleanupUpdateArtifacts(Application.ExecutablePath, "", afterUpdate);
+        // 升级重启后（afterUpdate=true）先保留 .old 到窗体 OnShown 成功后再清理，确保构造崩溃还能回滚
+        if (!afterUpdate)
+        {
+            MainForm.CleanupUpdateArtifacts(Application.ExecutablePath, "", false);
+        }
+
 
         var titles = new List<string>();
         var lists = new List<string[]>();
 
 
         string icoPath = Path.Combine(exeDir, "rx.ico");
-        MainForm form = null;
         try
         {
             form = new MainForm(icoPath, titles.ToArray(), lists.ToArray(), dataDir);
@@ -251,11 +281,36 @@ static class Program
         catch (Exception ex)
         {
             Native.Log("startup EX: " + ex);
+            string exePath = Application.ExecutablePath;
+            string oldExe = exePath + ".old";
+            if (afterUpdate && File.Exists(oldExe))
+            {
+                if (MessageBox.Show(
+                        "新版本启动失败：" + ex.Message + "\r\n\r\n检测到升级前旧版本备份，是否立即恢复到上一版本并重启？",
+                        "RX 工具箱 - 恢复旧版本",
+                        MessageBoxButtons.YesNo, MessageBoxIcon.Error) == DialogResult.Yes)
+                {
+                    try
+                    {
+                        MainForm.RollbackSelfUpdateFiles(exePath, oldExe, exePath + ".upd", "", "", "");
+                        var psi = new System.Diagnostics.ProcessStartInfo();
+                        psi.FileName = exePath;
+                        psi.WorkingDirectory = Path.GetDirectoryName(exePath);
+                        psi.UseShellExecute = false;
+                        using (var p = System.Diagnostics.Process.Start(psi)) { }
+                    }
+                    catch (Exception rex)
+                    {
+                        MessageBox.Show("恢复失败：" + rex.Message, "RX 工具箱", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
+                }
+                return;
+            }
             MessageBox.Show("启动失败：" + ex.Message, "RX 工具箱", MessageBoxButtons.OK, MessageBoxIcon.Error);
             return;
         }
 
-        form.Text = "RX 工具箱 " + MainForm.APP_VERSION + (g_dev ? " · DEV" : "");
+        form.Text = "RX 工具箱 " + MainForm.APP_VERSION + MainForm.APP_EDITION_SUFFIX + (g_dev ? " · DEV" : "");
 
         Application.Run(form);
     }

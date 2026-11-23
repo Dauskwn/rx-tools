@@ -28,7 +28,7 @@ pwsh -NoProfile -File build\build.ps1
 
 ```powershell
 $env:RX_SELFTEST = "1"
-dist\Rx工具箱.exe        # 不建窗口运行核心单元测试（27 项），结果写 selftest.log，失败退出码 1
+dist\Rx工具箱.exe        # 不建窗口运行核心单元测试（43 项），结果写 selftest.log，失败退出码 1
 
 $env:RX_DUMP_UI = "1"
 dist\Rx工具箱.exe        # 将各标签页控件坐标写入 dump-ui.log

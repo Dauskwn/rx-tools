@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Drawing.Imaging;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
@@ -48,6 +49,14 @@ public partial class MainForm
         btnHotkeyOff.ForeColor = Color.FromArgb(60, 90, 140);
         btnHotkeyOff.FlatAppearance.BorderColor = Color.FromArgb(180, 205, 238);
         btnHotkeyOff.Click += delegate { ToggleHotkeys(); };
+        var tipHotkeyOff = new ToolTip(uiComponents);
+        tipHotkeyOff.ToolTipIcon = ToolTipIcon.Warning;
+        tipHotkeyOff.ToolTipTitle = "注意：关闭热键将交还按键给游戏";
+        tipHotkeyOff.InitialDelay = 200;
+        tipHotkeyOff.AutoPopDelay = 12000;
+        tipHotkeyOff.ShowAlways = true;
+        tipHotkeyOff.SetToolTip(btnHotkeyOff,
+            "关闭热键后，F5~F8 等按键将恢复由 GMod 自身快捷键接管。\r\n请小心误触重新进服等较危险的游戏快捷键/组合键！");
         host.Controls.Add(btnHotkeyOff);
 
         btnHotkey = new Button();
@@ -57,82 +66,6 @@ public partial class MainForm
         host.Controls.Add(btnHotkey);
     }
 
-    void AddPlayerStripDivider(TabPage page)
-    {
-        var div = new Panel();
-        div.SetBounds(8, 50, Math.Max(100, page.ClientSize.Width - 16), 1);
-        div.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
-        div.BackColor = Color.FromArgb(226, 232, 240);
-        page.Controls.Add(div);
-    }
-
-    void BuildPlayerToolPages()
-    {
-        joinPage = new TabPage("挤服助手");
-        joinPage.BackColor = Color.White;
-        AddPlayerStripDivider(joinPage);
-        CreateJoinPanel(joinPage, 54);
-
-        crossPage = new TabPage("屏幕准星");
-        crossPage.BackColor = Color.White;
-        AddPlayerStripDivider(crossPage);
-        CreateCrossPanel(crossPage, 54);
-
-        timerPage = new TabPage("倒计时");
-        timerPage.BackColor = Color.White;
-        AddPlayerStripDivider(timerPage);
-        CreateTimerPanel(timerPage, 54);
-
-        lblPlayerBarTip = new Label();
-        lblPlayerBarTip.Font = TrackFont("Microsoft YaHei UI", 9.5f, FontStyle.Regular);
-        lblPlayerBarTip.ForeColor = Color.FromArgb(90, 98, 112);
-        lblPlayerBarTip.AutoEllipsis = true;
-        lblPlayerBarTip.UseMnemonic = false;
-        lblPlayerBarTip.Text = "A2S 状态探测与自动挤服 · 支持手动档 / 单一 IP / 收藏轮询（OCR 自动停）";
-        lblPlayerBarTip.SetBounds(12, 17, 410, 22);
-        joinPage.Controls.Add(lblPlayerBarTip);
-        CreateToolUtilityButtons(joinPage);
-
-        joinPage.Resize += delegate { LayoutToolBar(); };
-        crossPage.Resize += delegate { LayoutToolBar(); };
-        timerPage.Resize += delegate { LayoutToolBar(); };
-
-        tabs.TabPages.Add(joinPage);
-        tabs.TabPages.Add(crossPage);
-        tabs.TabPages.Add(timerPage);
-
-        UpdatePlayerToolBar();
-        LayoutToolBar();
-        LayoutJoin();
-        LoadFavs();
-        FillSrvList();
-        ApplyModeUi();
-        UpdateHotkeyLabels();
-    }
-
-    void UpdatePlayerToolBar()
-    {
-        if (tabs == null || btnHotkey == null) return;
-        TabPage sel = tabs.SelectedTab;
-        if (sel == null && joinPage != null) sel = joinPage;
-        if (sel != joinPage && sel != crossPage && sel != timerPage) return;
-
-        if (lblPlayerBarTip != null && lblPlayerBarTip.Parent != sel) sel.Controls.Add(lblPlayerBarTip);
-        if (btnHotkeyOff != null && btnHotkeyOff.Parent != sel) sel.Controls.Add(btnHotkeyOff);
-        if (bLog != null && bLog.Parent != sel) sel.Controls.Add(bLog);
-        if (btnHotkey != null && btnHotkey.Parent != sel) sel.Controls.Add(btnHotkey);
-
-        if (lblPlayerBarTip != null)
-        {
-            if (sel == joinPage)
-                lblPlayerBarTip.Text = "A2S 状态探测与自动挤服 · 支持手动档 / 单一 IP / 收藏轮询（OCR 自动停）";
-            else if (sel == crossPage)
-                lblPlayerBarTip.Text = "桌面置顶透明准星 · 支持矢量调节与导入/粘贴自定义准星图";
-            else if (sel == timerPage)
-                lblPlayerBarTip.Text = "透明点击穿透倒计时 · 支持多方案管理与时间链变色 / 闪烁 / 标注";
-        }
-        LayoutToolBar();
-    }
 
     Panel CreateJoinPanel(Control page, int topY)
     {
@@ -156,32 +89,35 @@ public partial class MainForm
 
         var lblMode = new Label();
         lblMode.Text = "模式：";
-        lblMode.SetBounds(194, 13, 48, 22);
+        lblMode.SetBounds(192, 13, 44, 22);
         pJoin.Controls.Add(lblMode);
 
-        rbTapMode = new RadioButton();
-        rbTapMode.Text = "手动档";
-        rbTapMode.SetBounds(242, 11, 86, 24);
-        rbTapMode.Checked = true;
-        rbTapMode.CheckedChanged += delegate { if (rbTapMode.Checked) OnModeChanged(); };
+        rbTapMode = new RadioButton(); rbTapMode.Checked = true; rbTapMode.Visible = false;
+        rbOneIp = new RadioButton(); rbOneIp.Visible = false;
+        rbPollMode = new RadioButton(); rbPollMode.Visible = false;
         pJoin.Controls.Add(rbTapMode);
-
-        rbOneIp = new RadioButton();
-        rbOneIp.Text = "单一 IP";
-        rbOneIp.SetBounds(330, 11, 90, 24);
-        rbOneIp.CheckedChanged += delegate { if (rbOneIp.Checked) OnModeChanged(); };
         pJoin.Controls.Add(rbOneIp);
-
-        rbPollMode = new RadioButton();
-        rbPollMode.Text = "收藏轮询";
-        rbPollMode.SetBounds(422, 11, 98, 24);
-        rbPollMode.CheckedChanged += delegate { if (rbPollMode.Checked) OnModeChanged(); };
         pJoin.Controls.Add(rbPollMode);
+
+        segJoinMode = new RxSegmentedControl();
+        segJoinMode.Items = new string[] { "手动档", "单一 IP", "收藏轮询" };
+        segJoinMode.SetBounds(238, 8, 252, 30);
+        segJoinMode.SelectedIndexChanged += delegate
+        {
+            suppressModeEvent = true;
+            int idx = segJoinMode.SelectedIndex;
+            rbTapMode.Checked = (idx == 0);
+            rbOneIp.Checked = (idx == 1);
+            rbPollMode.Checked = (idx == 2);
+            suppressModeEvent = false;
+            OnModeChanged();
+        };
+        pJoin.Controls.Add(segJoinMode);
 
         btnGuide = new Button();
         btnGuide.Text = "?";
         btnGuide.Font = TrackFont("Microsoft YaHei UI", 9f, FontStyle.Bold);
-        btnGuide.SetBounds(524, 10, 26, 26);
+        btnGuide.SetBounds(498, 10, 26, 26);
         btnGuide.Click += delegate { ShowGuide(); };
         pJoin.Controls.Add(btnGuide);
 
@@ -191,21 +127,21 @@ public partial class MainForm
 
         var lblSpeed = new Label();
         lblSpeed.Text = "间隔：";
-        lblSpeed.SetBounds(560, 13, 46, 22);
+        lblSpeed.SetBounds(534, 13, 44, 22);
         pJoin.Controls.Add(lblSpeed);
 
         cmbSpeed = new ThemedComboBox();
         cmbSpeed.DropDownStyle = ComboBoxStyle.DropDownList;
         cmbSpeed.Items.AddRange(TapIntervals);
         cmbSpeed.SelectedIndex = 1;
-        cmbSpeed.SetBounds(606, 10, 92, 26);
+        cmbSpeed.SetBounds(580, 10, 90, 26);
         cmbSpeed.SelectedIndexChanged += delegate { SaveSettings(); RefreshUi(true); };
         pJoin.Controls.Add(cmbSpeed);
 
         chkOcr = new CheckBox();
         chkOcr.Text = "OCR 识别进服后自动停";
         chkOcr.Checked = true;
-        chkOcr.SetBounds(712, 12, 210, 24);
+        chkOcr.SetBounds(682, 12, 180, 24);
         chkOcr.CheckedChanged += delegate
         {
             SaveSettings();
@@ -242,6 +178,18 @@ public partial class MainForm
         btnRefreshFav.Click += delegate { RefreshAllFavs(); };
         pJoin.Controls.Add(btnRefreshFav);
 
+        btnSyncSrv = new Button();
+        btnSyncSrv.Text = "同步线上";
+        btnSyncSrv.BackColor = Color.FromArgb(244, 248, 255);
+        btnSyncSrv.ForeColor = Color.FromArgb(24, 64, 128);
+        btnSyncSrv.FlatStyle = FlatStyle.Flat;
+        btnSyncSrv.FlatAppearance.BorderColor = Color.FromArgb(180, 205, 238);
+        btnSyncSrv.SetBounds(742, 46, 82, 28);
+        btnSyncSrv.Click += delegate { TriggerManualServerSync(); };
+        var tipSyncSrv = new ToolTip(uiComponents);
+        tipSyncSrv.SetToolTip(btnSyncSrv, "从线上同步最新服务器列表并合并（已有 IP 保留你的备注）");
+        pJoin.Controls.Add(btnSyncSrv);
+
         lvSrv = new BufferedListView();
         lvSrv.View = View.Details;
         lvSrv.CheckBoxes = true;
@@ -249,10 +197,12 @@ public partial class MainForm
         lvSrv.MultiSelect = true;
         lvSrv.HideSelection = false;
         lvSrv.HeaderStyle = ColumnHeaderStyle.Clickable;
-        lvSrv.Columns.Add("备注名", 110);
-        lvSrv.Columns.Add("真实服务器名（A2S 探测）", 370);
-        lvSrv.Columns.Add("人数", 104, HorizontalAlignment.Right);
-        lvSrv.Columns.Add("地址", 160);
+        lvSrv.Columns.Add("备注名", 104);
+        lvSrv.Columns.Add("真实服务器名（A2S 探测）", 260);
+        lvSrv.Columns.Add("地图", 128);
+        lvSrv.Columns.Add("延迟", 64, HorizontalAlignment.Right);
+        lvSrv.Columns.Add("人数", 108, HorizontalAlignment.Right);
+        lvSrv.Columns.Add("地址", 148);
         lvSrv.SetBounds(8, 80, 900, 290);
         lvSrv.ColumnClick += delegate(object snd, ColumnClickEventArgs ce) { SortSrvListByColumn(ce.Column); };
         lvSrv.SelectedIndexChanged += delegate
@@ -401,6 +351,8 @@ public partial class MainForm
         pCross.SetBounds(8, topY, page.ClientSize.Width - 16, page.ClientSize.Height - topY - 8);
         pCross.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
         page.Controls.Add(pCross);
+        pCrossPanel = pCross;
+        pCross.Resize += delegate { LayoutCrossPanel(); };
 
         btnCross = new Button();
         btnCross.Text = "准星开关 (" + KeyName(4) + ")";
@@ -419,8 +371,11 @@ public partial class MainForm
         btnColor.Click += delegate
         {
             overlay.CycleColor();
+            suppressSettingsSave = true;
             if (cmbColor != null) cmbColor.SelectedIndex = overlay.ColorIndex;
+            suppressSettingsSave = false;
             if (crossPreview != null) crossPreview.Invalidate();
+            SyncCrossPresetUiState();
             SaveSettings();
             RefreshUi(true);
         };
@@ -438,12 +393,55 @@ public partial class MainForm
         cmbColor.SetBounds(372, 9, 110, 26);
         cmbColor.SelectedIndexChanged += delegate
         {
+            if (suppressSettingsSave) return;
             overlay.ColorIndex = cmbColor.SelectedIndex;
             if (crossPreview != null) crossPreview.Invalidate();
+            SyncCrossPresetUiState();
             SaveSettings();
             RefreshUi(true);
         };
         pCross.Controls.Add(cmbColor);
+
+        var lblOutline = new Label();
+        lblOutline.Text = "黑描边：";
+        lblOutline.SetBounds(496, 12, 58, 22);
+        pCross.Controls.Add(lblOutline);
+
+        nCrossOutline = new NumericUpDown();
+        nCrossOutline.Minimum = 0; nCrossOutline.Maximum = 2;
+        nCrossOutline.Value = overlay.OutlineWidth;
+        nCrossOutline.SetBounds(556, 9, 50, 26);
+        nCrossOutline.ValueChanged += delegate
+        {
+            if (suppressSettingsSave) return;
+            overlay.OutlineWidth = (int)nCrossOutline.Value;
+            overlay.Invalidate();
+            if (crossPreview != null) crossPreview.Invalidate();
+            SyncCrossPresetUiState();
+            SaveSettings();
+        };
+        pCross.Controls.Add(nCrossOutline);
+
+        var lblOpacity = new Label();
+        lblOpacity.Text = "透明度%：";
+        lblOpacity.SetBounds(618, 12, 66, 22);
+        pCross.Controls.Add(lblOpacity);
+
+        nCrossOpacity = new NumericUpDown();
+        nCrossOpacity.Minimum = 20; nCrossOpacity.Maximum = 100;
+        nCrossOpacity.Increment = 5;
+        nCrossOpacity.Value = overlay.OpacityPct;
+        nCrossOpacity.SetBounds(686, 9, 58, 26);
+        nCrossOpacity.ValueChanged += delegate
+        {
+            if (suppressSettingsSave) return;
+            overlay.OpacityPct = (int)nCrossOpacity.Value;
+            overlay.Invalidate();
+            if (crossPreview != null) crossPreview.Invalidate();
+            SyncCrossPresetUiState();
+            SaveSettings();
+        };
+        pCross.Controls.Add(nCrossOpacity);
 
         var lblStyle = new Label();
         lblStyle.Text = "样式：";
@@ -457,10 +455,12 @@ public partial class MainForm
         cmbStyle.SetBounds(58, 54, 180, 26);
         cmbStyle.SelectedIndexChanged += delegate
         {
+            if (suppressSettingsSave) return;
             overlay.StyleIndex = cmbStyle.SelectedIndex;
             overlay.Invalidate();
             if (crossPreview != null) crossPreview.Invalidate();
-            if (!suppressSettingsSave) toast.ShowText("准星样式：" + cmbStyle.Text);
+            toast.ShowText("准星样式：" + cmbStyle.Text);
+            SyncCrossPresetUiState();
             SaveSettings();
             RefreshUi(true);
         };
@@ -477,9 +477,11 @@ public partial class MainForm
         nThick.SetBounds(306, 54, 56, 26);
         nThick.ValueChanged += delegate
         {
+            if (suppressSettingsSave) return;
             overlay.Thickness = (int)nThick.Value;
             overlay.Invalidate();
             if (crossPreview != null) crossPreview.Invalidate();
+            SyncCrossPresetUiState();
             SaveSettings();
         };
         pCross.Controls.Add(nThick);
@@ -495,9 +497,11 @@ public partial class MainForm
         nLen.SetBounds(428, 54, 56, 26);
         nLen.ValueChanged += delegate
         {
+            if (suppressSettingsSave) return;
             overlay.Length = (int)nLen.Value;
             overlay.Invalidate();
             if (crossPreview != null) crossPreview.Invalidate();
+            SyncCrossPresetUiState();
             SaveSettings();
         };
         pCross.Controls.Add(nLen);
@@ -513,9 +517,11 @@ public partial class MainForm
         nGap.SetBounds(550, 54, 56, 26);
         nGap.ValueChanged += delegate
         {
+            if (suppressSettingsSave) return;
             overlay.Gap = (int)nGap.Value;
             overlay.Invalidate();
             if (crossPreview != null) crossPreview.Invalidate();
+            SyncCrossPresetUiState();
             SaveSettings();
         };
         pCross.Controls.Add(nGap);
@@ -531,55 +537,465 @@ public partial class MainForm
         nDot.SetBounds(682, 54, 56, 26);
         nDot.ValueChanged += delegate
         {
+            if (suppressSettingsSave) return;
             overlay.DotSize = (int)nDot.Value;
             overlay.Invalidate();
             if (crossPreview != null) crossPreview.Invalidate();
+            SyncCrossPresetUiState();
             SaveSettings();
         };
         pCross.Controls.Add(nDot);
 
-        btnCrossImg = new Button();
-        btnCrossImg.Text = "导入准星图片…";
-        btnCrossImg.SetBounds(8, 284, 132, 30);
-        btnCrossImg.Click += delegate { ImportCrosshairImage(); };
-        pCross.Controls.Add(btnCrossImg);
-
-        btnCrossImgPaste = new Button();
-        btnCrossImgPaste.Text = "粘贴图片";
-        btnCrossImgPaste.SetBounds(148, 284, 96, 30);
-        btnCrossImgPaste.Click += delegate { PasteCrosshairImage(); };
-        pCross.Controls.Add(btnCrossImgPaste);
-
-        btnCrossImgClear = new Button();
-        btnCrossImgClear.Text = "清除图片";
-        btnCrossImgClear.SetBounds(252, 284, 88, 30);
-        btnCrossImgClear.Click += delegate { ClearCrosshairImage(); };
-        pCross.Controls.Add(btnCrossImgClear);
-
-        lblCrossImg = new Label();
-        lblCrossImg.Text = "当前用内置矢量样式（可导入 PNG 做自定义准星）";
-        lblCrossImg.ForeColor = Color.FromArgb(90, 100, 114);
-        lblCrossImg.SetBounds(352, 290, 520, 22);
-        pCross.Controls.Add(lblCrossImg);
-
         crossPreview = new CrosshairPreview(overlay);
-        crossPreview.SetBounds(8, 96, 180, 180);
+        crossPreview.SetBounds(8, 96, 210, 210);
         crossPreview.Cursor = Cursors.Hand;
         crossPreview.Click += delegate
         {
             overlay.CycleColor();
+            suppressSettingsSave = true;
             if (cmbColor != null) cmbColor.SelectedIndex = overlay.ColorIndex;
+            suppressSettingsSave = false;
             crossPreview.Invalidate();
+            SyncCrossPresetUiState();
             SaveSettings();
             RefreshUi(true);
         };
         pCross.Controls.Add(crossPreview);
 
+        PaintEventHandler drawCardBorder = delegate(object snd, PaintEventArgs pe)
+        {
+            var pnl = (Panel)snd;
+            pe.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            using (var pen = new Pen(ThemePalette.BorderSubtle, 1f))
+                Native.DrawRoundedRect(pe.Graphics, pen, new Rectangle(0, 0, pnl.Width - 1, pnl.Height - 1), 8);
+        };
+
+        // 卡片 1：准星多方案预设卡片条
+        var cardPreset = new Panel();
+        cardPreset.Tag = "rx-surface-card";
+        cardPreset.BackColor = ThemePalette.SurfaceAlt;
+        cardPreset.SetBounds(230, 96, 514, 112);
+        cardPreset.Paint += drawCardBorder;
+        pCross.Controls.Add(cardPreset);
+        cardCrossPreset = cardPreset;
+
+        var lblPresetHead = new Label();
+        lblPresetHead.Text = "准星方案";
+        lblPresetHead.Font = TrackFont("Microsoft YaHei UI", 9.5f, FontStyle.Bold);
+        lblPresetHead.SetBounds(10, 6, 68, 20);
+        cardPreset.Controls.Add(lblPresetHead);
+
+        var lblPresetSub = new Label();
+        lblPresetSub.Text = "单击切换 · 右键管理";
+        lblPresetSub.Font = TrackFont("Microsoft YaHei UI", 8.5f, FontStyle.Regular);
+        lblPresetSub.ForeColor = Color.Gray;
+        lblPresetSub.SetBounds(80, 8, 140, 18);
+        cardPreset.Controls.Add(lblPresetSub);
+
+        btnCrossPresetSave = new Button();
+        btnCrossPresetSave.Text = "保存覆盖";
+        btnCrossPresetSave.Font = TrackFont("Microsoft YaHei UI", 8.5f, FontStyle.Regular);
+        btnCrossPresetSave.SetBounds(354, 4, 78, 24);
+        btnCrossPresetSave.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+        btnCrossPresetSave.Click += delegate { SaveCurrentToActiveCrossPreset(); };
+        cardPreset.Controls.Add(btnCrossPresetSave);
+
+        btnCrossPresetAdd = new Button();
+        btnCrossPresetAdd.Text = "＋ 新建";
+        btnCrossPresetAdd.Font = TrackFont("Microsoft YaHei UI", 8.5f, FontStyle.Bold);
+        btnCrossPresetAdd.BackColor = Color.FromArgb(228, 242, 255);
+        btnCrossPresetAdd.ForeColor = Color.FromArgb(24, 64, 128);
+        btnCrossPresetAdd.SetBounds(438, 4, 66, 24);
+        btnCrossPresetAdd.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+        btnCrossPresetAdd.Click += delegate { AddCrossPresetFromCurrent(); };
+        cardPreset.Controls.Add(btnCrossPresetAdd);
+
+        crossPresetStrip = new CrosshairPresetStrip();
+        crossPresetStrip.Presets = crossPresets;
+        crossPresetStrip.ActiveIndex = activeCrossPresetIdx;
+        crossPresetStrip.SetBounds(8, 32, 498, 74);
+        crossPresetStrip.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+        crossPresetStrip.PresetClicked += delegate(int idx) { ApplyCrossPreset(idx, false); };
+        crossPresetStrip.PresetContextRequested += delegate(int idx, Point pt) { ShowCrossPresetContextMenu(idx, pt); };
+        cardPreset.Controls.Add(crossPresetStrip);
+
+        // 卡片 2：中心位置微调
+        var cardOffset = new Panel();
+        cardOffset.Tag = "rx-surface-card";
+        cardOffset.BackColor = ThemePalette.SurfaceAlt;
+        cardOffset.SetBounds(230, 216, 514, 90);
+        cardOffset.Paint += drawCardBorder;
+        pCross.Controls.Add(cardOffset);
+        cardCrossOffset = cardOffset;
+
+        var lblOffHead = new Label();
+        lblOffHead.Text = "中心位置微调";
+        lblOffHead.Font = TrackFont("Microsoft YaHei UI", 9.5f, FontStyle.Bold);
+        lblOffHead.SetBounds(10, 6, 108, 20);
+        cardOffset.Controls.Add(lblOffHead);
+
+        lblCrossOffBadge = new Label();
+        lblCrossOffBadge.Text = "已居中 (0, 0)";
+        lblCrossOffBadge.Font = TrackFont("Microsoft YaHei UI", 8.5f, FontStyle.Regular);
+        lblCrossOffBadge.ForeColor = Color.Gray;
+        lblCrossOffBadge.TextAlign = ContentAlignment.MiddleRight;
+        lblCrossOffBadge.SetBounds(340, 7, 164, 18);
+        lblCrossOffBadge.Anchor = AnchorStyles.Top | AnchorStyles.Right;
+        cardOffset.Controls.Add(lblCrossOffBadge);
+
+        var tipOff = new ToolTip(uiComponents);
+        tipOff.InitialDelay = 300;
+        string[] stepLbls = { "←", "↑", "•", "↓", "→" };
+        int[] stepDx = { -1, 0, 0, 0, 1 };
+        int[] stepDy = { 0, -1, 0, 1, 0 };
+        string[] stepTips = { "向左微调 1px", "向上微调 1px", "水平/垂直偏移归零", "向下微调 1px", "向右微调 1px" };
+        for (int si = 0; si < stepLbls.Length; si++)
+        {
+            int dx = stepDx[si], dy = stepDy[si];
+            bool isCenterBtn = (dx == 0 && dy == 0);
+            var sb = new Button();
+            sb.Text = stepLbls[si];
+            sb.Font = TrackFont("Microsoft YaHei UI", 9f, isCenterBtn ? FontStyle.Bold : FontStyle.Regular);
+            sb.SetBounds(10 + si * 29, 32, 26, 26);
+            sb.Click += delegate
+            {
+                if (isCenterBtn) ResetCrossOffset();
+                else AdjustCrossOffset(dx, dy);
+            };
+            tipOff.SetToolTip(sb, stepTips[si]);
+            cardOffset.Controls.Add(sb);
+        }
+
+        var lblOffX = new Label();
+        lblOffX.Text = "X:";
+        lblOffX.SetBounds(166, 35, 18, 20);
+        cardOffset.Controls.Add(lblOffX);
+
+        nCrossOffX = new NumericUpDown();
+        nCrossOffX.Minimum = Overlay.OffsetMin; nCrossOffX.Maximum = Overlay.OffsetMax;
+        nCrossOffX.Value = Overlay.ClampOffset(overlay.OffsetX);
+        nCrossOffX.SetBounds(186, 33, 52, 26);
+        nCrossOffX.ValueChanged += delegate
+        {
+            if (suppressSettingsSave) return;
+            overlay.OffsetX = Overlay.ClampOffset((int)nCrossOffX.Value);
+            overlay.CenterAndRedraw();
+            if (crossPreview != null) crossPreview.Invalidate();
+            SyncCrossPresetUiState();
+            SaveSettings();
+        };
+        cardOffset.Controls.Add(nCrossOffX);
+
+        var lblOffY = new Label();
+        lblOffY.Text = "Y:";
+        lblOffY.SetBounds(248, 35, 18, 20);
+        cardOffset.Controls.Add(lblOffY);
+
+        nCrossOffY = new NumericUpDown();
+        nCrossOffY.Minimum = Overlay.OffsetMin; nCrossOffY.Maximum = Overlay.OffsetMax;
+        nCrossOffY.Value = Overlay.ClampOffset(overlay.OffsetY);
+        nCrossOffY.SetBounds(268, 33, 52, 26);
+        nCrossOffY.ValueChanged += delegate
+        {
+            if (suppressSettingsSave) return;
+            overlay.OffsetY = Overlay.ClampOffset((int)nCrossOffY.Value);
+            overlay.CenterAndRedraw();
+            if (crossPreview != null) crossPreview.Invalidate();
+            SyncCrossPresetUiState();
+            SaveSettings();
+        };
+        cardOffset.Controls.Add(nCrossOffY);
+
+        var btnCrossOffReset = new Button();
+        btnCrossOffReset.Text = "归零";
+        btnCrossOffReset.SetBounds(330, 32, 58, 26);
+        btnCrossOffReset.Click += delegate { ResetCrossOffset(); };
+        cardOffset.Controls.Add(btnCrossOffReset);
+
+        var lblOffHint = new Label();
+        lblOffHint.Text = "适配不同游戏或分辨率下的 1~2px 中心偏差，调整后屏幕准星实时移动";
+        lblOffHint.Font = TrackFont("Microsoft YaHei UI", 8.2f, FontStyle.Regular);
+        lblOffHint.ForeColor = Color.Gray;
+        lblOffHint.AutoEllipsis = true;
+        lblOffHint.SetBounds(10, 65, 494, 18);
+        lblOffHint.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+        cardOffset.Controls.Add(lblOffHint);
+
+        btnCrossImg = new Button();
+        btnCrossImg.Text = "导入准星图片…";
+        btnCrossImg.SetBounds(8, 318, 132, 30);
+        btnCrossImg.Click += delegate { ImportCrosshairImage(); };
+        pCross.Controls.Add(btnCrossImg);
+
+        btnCrossImgPaste = new Button();
+        btnCrossImgPaste.Text = "粘贴图片";
+        btnCrossImgPaste.SetBounds(148, 318, 96, 30);
+        btnCrossImgPaste.Click += delegate { PasteCrosshairImage(); };
+        pCross.Controls.Add(btnCrossImgPaste);
+
+        btnCrossImgClear = new Button();
+        btnCrossImgClear.Text = "清除图片";
+        btnCrossImgClear.SetBounds(252, 318, 88, 30);
+        btnCrossImgClear.Click += delegate { ClearCrosshairImage(); };
+        pCross.Controls.Add(btnCrossImgClear);
+
+        lblCrossImg = new Label();
+        lblCrossImg.Text = "当前用内置 32-bit 矢量样式（导入 PNG 将完整保留透明羽化与光晕）";
+        lblCrossImg.ForeColor = Color.FromArgb(90, 100, 114);
+        lblCrossImg.AutoEllipsis = true;
+        lblCrossImg.SetBounds(352, 324, 480, 22);
+        pCross.Controls.Add(lblCrossImg);
+
         lblCrossHint = new Label();
         lblCrossHint.ForeColor = Color.FromArgb(80, 90, 102);
-        lblCrossHint.SetBounds(206, 98, 620, 160);
+        lblCrossHint.SetBounds(8, 358, 736, 48);
         pCross.Controls.Add(lblCrossHint);
+        SyncCrossPresetUiState();
         return pCross;
+    }
+
+    void LayoutCrossPanel()
+    {
+        if (pCrossPanel == null || pCrossPanel.IsDisposed) return;
+        int W = pCrossPanel.ClientSize.Width;
+        if (W < 300) return;
+        int cw = Math.Max(416, Math.Min(600, W - 238));
+        if (cardCrossPreset != null) cardCrossPreset.SetBounds(230, 96, cw, 112);
+        if (cardCrossOffset != null) cardCrossOffset.SetBounds(230, 216, cw, 90);
+        if (lblCrossImg != null) lblCrossImg.Width = Math.Max(200, W - 360);
+        if (lblCrossHint != null) lblCrossHint.SetBounds(8, 358, Math.Max(360, W - 16), 48);
+    }
+
+    void AdjustCrossOffset(int dx, int dy)
+    {
+        int nx = Overlay.ClampOffset(overlay.OffsetX + dx);
+        int ny = Overlay.ClampOffset(overlay.OffsetY + dy);
+        ApplyCrossOffsetValues(nx, ny);
+    }
+
+    void ResetCrossOffset()
+    {
+        if (overlay.OffsetX == 0 && overlay.OffsetY == 0)
+        {
+            toast.ShowText("准星已处于中心 (0, 0)");
+            return;
+        }
+        ApplyCrossOffsetValues(0, 0);
+        toast.ShowText("准星偏移已归零 (0, 0)");
+    }
+
+    void ApplyCrossOffsetValues(int ox, int oy)
+    {
+        suppressSettingsSave = true;
+        try
+        {
+            overlay.OffsetX = Overlay.ClampOffset(ox);
+            overlay.OffsetY = Overlay.ClampOffset(oy);
+            if (nCrossOffX != null) nCrossOffX.Value = overlay.OffsetX;
+            if (nCrossOffY != null) nCrossOffY.Value = overlay.OffsetY;
+        }
+        finally { suppressSettingsSave = false; }
+        overlay.CenterAndRedraw();
+        if (crossPreview != null) crossPreview.Invalidate();
+        SyncCrossPresetUiState();
+        SaveSettings();
+    }
+
+    void SyncCrossPresetUiState()
+    {
+        if (overlay == null) return;
+        int ox = Overlay.ClampOffset(overlay.OffsetX);
+        int oy = Overlay.ClampOffset(overlay.OffsetY);
+        if (lblCrossOffBadge != null)
+        {
+            bool zero = (ox == 0 && oy == 0);
+            lblCrossOffBadge.Text = zero
+                ? "已居中 (0, 0)"
+                : ("偏移 " + (ox >= 0 ? "+" : "") + ox + ", " + (oy >= 0 ? "+" : "") + oy + " px");
+            SetDynamicLabelColor(lblCrossOffBadge, zero
+                ? Color.FromArgb(110, 122, 138)
+                : Color.FromArgb(37, 99, 235));
+        }
+
+        if (crossPresets == null || crossPresets.Count == 0)
+            crossPresets = CrosshairPreset.CreateDefaultPresets();
+        if (activeCrossPresetIdx < 0 || activeCrossPresetIdx >= crossPresets.Count)
+            activeCrossPresetIdx = 0;
+
+        bool exactMatch = (activeCrossPresetIdx >= 0 && activeCrossPresetIdx < crossPresets.Count)
+            && crossPresets[activeCrossPresetIdx].MatchesOverlay(overlay);
+        if (crossPresetStrip != null)
+        {
+            crossPresetStrip.Presets = crossPresets;
+            crossPresetStrip.ActiveIndex = activeCrossPresetIdx;
+            crossPresetStrip.IsActiveModified = !exactMatch;
+            crossPresetStrip.Invalidate();
+        }
+        if (btnCrossPresetSave != null)
+        {
+            btnCrossPresetSave.Text = exactMatch ? "已同步" : "保存覆盖*";
+            btnCrossPresetSave.Enabled = (crossPresets.Count > 0);
+        }
+        if (btnCrossPresetAdd != null)
+        {
+            btnCrossPresetAdd.Enabled = (crossPresets.Count < 6);
+        }
+    }
+
+    void ApplyCrossPreset(int idx, bool silent)
+    {
+        if (crossPresets == null || idx < 0 || idx >= crossPresets.Count) return;
+        CrosshairPreset p = crossPresets[idx];
+        activeCrossPresetIdx = idx;
+
+        suppressSettingsSave = true;
+        try
+        {
+            p.ApplyScalarToOverlay(overlay);
+            if (cmbStyle != null) cmbStyle.SelectedIndex = overlay.StyleIndex;
+            if (cmbColor != null) cmbColor.SelectedIndex = overlay.ColorIndex;
+            if (nThick != null) nThick.Value = overlay.Thickness;
+            if (nLen != null) nLen.Value = overlay.Length;
+            if (nGap != null) nGap.Value = overlay.Gap;
+            if (nDot != null) nDot.Value = overlay.DotSize;
+            if (nCrossOutline != null) nCrossOutline.Value = overlay.OutlineWidth;
+            if (nCrossOpacity != null) nCrossOpacity.Value = overlay.OpacityPct;
+            if (nCrossOffX != null) nCrossOffX.Value = overlay.OffsetX;
+            if (nCrossOffY != null) nCrossOffY.Value = overlay.OffsetY;
+
+            string wantImg = p.CustomImagePath ?? "";
+            if (string.IsNullOrEmpty(wantImg))
+            {
+                if (overlay.CustomImage != null) { try { overlay.CustomImage.Dispose(); } catch { } }
+                overlay.CustomImage = null;
+                overlay.CustomImagePath = "";
+                if (lblCrossImg != null) lblCrossImg.Text = "当前用内置矢量样式（可导入 PNG 做自定义准星）";
+            }
+            else if (!string.Equals(wantImg, overlay.CustomImagePath, StringComparison.OrdinalIgnoreCase)
+                || overlay.CustomImage == null)
+            {
+                Bitmap loaded = File.Exists(wantImg) ? Overlay.PrepareCrosshairImage(wantImg) : null;
+                if (overlay.CustomImage != null) { try { overlay.CustomImage.Dispose(); } catch { } }
+                if (loaded != null)
+                {
+                    overlay.CustomImage = loaded;
+                    overlay.CustomImagePath = wantImg;
+                    if (lblCrossImg != null)
+                        lblCrossImg.Text = "自定义准星：" + Path.GetFileName(wantImg)
+                            + "（原图 " + loaded.Width + "×" + loaded.Height + "，可通过“臂长+间隙”调整大小）";
+                }
+                else
+                {
+                    overlay.CustomImage = null;
+                    overlay.CustomImagePath = "";
+                    if (lblCrossImg != null) lblCrossImg.Text = "当前用内置矢量样式（可导入 PNG 做自定义准星）";
+                    if (!silent) toast.ShowText("方案内图片不存在，已切回内置矢量样式");
+                }
+            }
+        }
+        finally { suppressSettingsSave = false; }
+
+        overlay.CenterAndRedraw();
+        if (crossPreview != null) crossPreview.Invalidate();
+        SyncCrossPresetUiState();
+        if (!silent)
+        {
+            SaveSettings();
+            toast.ShowText("已切换准星方案：" + p.Name);
+        }
+        RefreshUi(true);
+    }
+
+    void SaveCurrentToActiveCrossPreset()
+    {
+        if (crossPresets == null || crossPresets.Count == 0) return;
+        if (activeCrossPresetIdx < 0 || activeCrossPresetIdx >= crossPresets.Count) activeCrossPresetIdx = 0;
+        string keepName = crossPresets[activeCrossPresetIdx].Name;
+        crossPresets[activeCrossPresetIdx] = CrosshairPreset.FromOverlay(keepName, overlay);
+        SyncCrossPresetUiState();
+        SaveSettings();
+        toast.ShowText("已更新准星方案：" + keepName);
+    }
+
+    void AddCrossPresetFromCurrent()
+    {
+        if (crossPresets == null) crossPresets = CrosshairPreset.CreateDefaultPresets();
+        if (crossPresets.Count >= 6)
+        {
+            toast.ShowText("最多保存 6 套准星方案（可右键旧方案覆盖或删除）");
+            return;
+        }
+        string defName = string.IsNullOrEmpty(overlay.CustomImagePath)
+            ? Overlay.Styles[overlay.StyleIndex]
+            : Path.GetFileNameWithoutExtension(overlay.CustomImagePath);
+        string nm = PromptText("新建准星方案", "输入方案名称（将保存当前准星与微调偏移）：", defName);
+        if (nm == null) return;
+        nm = nm.Trim();
+        if (nm.Length == 0) return;
+        crossPresets.Add(CrosshairPreset.FromOverlay(nm, overlay));
+        activeCrossPresetIdx = crossPresets.Count - 1;
+        SyncCrossPresetUiState();
+        SaveSettings();
+        toast.ShowText("已新建准星方案：" + nm);
+    }
+
+    void ShowCrossPresetContextMenu(int idx, Point screenPt)
+    {
+        if (crossPresets == null || idx < 0 || idx >= crossPresets.Count) return;
+        var cms = new ContextMenuStrip();
+        cms.Items.Add("切换到该方案", null, delegate { ApplyCrossPreset(idx, false); });
+        cms.Items.Add("用当前配置覆盖保存", null, delegate
+        {
+            string nm = crossPresets[idx].Name;
+            crossPresets[idx] = CrosshairPreset.FromOverlay(nm, overlay);
+            activeCrossPresetIdx = idx;
+            SyncCrossPresetUiState();
+            SaveSettings();
+            toast.ShowText("已覆盖准星方案：" + nm);
+        });
+        cms.Items.Add("重命名…", null, delegate
+        {
+            string nm = PromptText("重命名准星方案", "输入新方案名称：", crossPresets[idx].Name);
+            if (nm == null) return;
+            nm = nm.Trim();
+            if (nm.Length == 0) return;
+            crossPresets[idx].Name = nm;
+            SyncCrossPresetUiState();
+            SaveSettings();
+        });
+        cms.Items.Add(new ToolStripSeparator());
+        var miDel = new ToolStripMenuItem("删除该方案", null, delegate
+        {
+            if (crossPresets.Count <= 1)
+            {
+                toast.ShowText("至少保留 1 套准星方案");
+                return;
+            }
+            string oldName = crossPresets[idx].Name;
+            crossPresets.RemoveAt(idx);
+            if (activeCrossPresetIdx == idx)
+                ApplyCrossPreset(Math.Min(idx, crossPresets.Count - 1), true);
+            else if (activeCrossPresetIdx > idx)
+                activeCrossPresetIdx--;
+            SyncCrossPresetUiState();
+            SaveSettings();
+            toast.ShowText("已删除准星方案：" + oldName);
+        });
+        miDel.Enabled = (crossPresets.Count > 1);
+        cms.Items.Add(miDel);
+        cms.Items.Add("恢复默认 4 套方案", null, delegate
+        {
+            if (MessageBox.Show("将重置准星方案列表为默认的 4 套样式，确定吗？", "恢复默认方案",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
+                return;
+            crossPresets = CrosshairPreset.CreateDefaultPresets();
+            ApplyCrossPreset(0, false);
+        });
+        cms.Closed += delegate
+        {
+            SafeBeginInvoke(delegate { try { cms.Dispose(); } catch { } });
+        };
+        cms.Show(screenPt);
     }
 
     Panel CreateTimerPanel(Control page, int topY)
@@ -715,50 +1131,50 @@ public partial class MainForm
         cmbTimerColor.DropDownStyle = ComboBoxStyle.DropDownList;
         cmbTimerColor.Items.AddRange(CountdownOverlay.TimerColorNames);
         cmbTimerColor.SelectedIndex = 0;
-        cmbTimerColor.SetBounds(162, 100, 88, 26);
+        cmbTimerColor.SetBounds(162, 100, 80, 26);
         cmbTimerColor.SelectedIndexChanged += delegate { OnTimerAppearanceEdited(false); };
         pTimer.Controls.Add(cmbTimerColor);
 
         var lblAnchorTitle = new Label();
         lblAnchorTitle.Text = "位置:";
-        lblAnchorTitle.SetBounds(258, 102, 40, 22);
+        lblAnchorTitle.SetBounds(248, 102, 38, 22);
         pTimer.Controls.Add(lblAnchorTitle);
 
         cmbTimerAnchor = new ThemedComboBox();
         cmbTimerAnchor.DropDownStyle = ComboBoxStyle.DropDownList;
         cmbTimerAnchor.Items.AddRange(CountdownOverlay.AnchorNames);
         cmbTimerAnchor.SelectedIndex = 1;
-        cmbTimerAnchor.SetBounds(300, 100, 156, 26);
+        cmbTimerAnchor.SetBounds(288, 100, 138, 26);
         cmbTimerAnchor.SelectedIndexChanged += delegate { OnTimerAppearanceEdited(true); };
         pTimer.Controls.Add(cmbTimerAnchor);
 
         var lblOffXTitle = new Label();
         lblOffXTitle.Text = "X:";
-        lblOffXTitle.SetBounds(466, 102, 20, 22);
+        lblOffXTitle.SetBounds(434, 102, 18, 22);
         pTimer.Controls.Add(lblOffXTitle);
 
         nTimerOffX = new NumericUpDown();
         nTimerOffX.Minimum = -1000; nTimerOffX.Maximum = 1000;
         nTimerOffX.Value = 0;
-        nTimerOffX.SetBounds(488, 100, 64, 26);
+        nTimerOffX.SetBounds(454, 100, 54, 26);
         nTimerOffX.ValueChanged += delegate { OnTimerAppearanceEdited(true); };
         pTimer.Controls.Add(nTimerOffX);
 
         var lblOffYTitle = new Label();
         lblOffYTitle.Text = "Y:";
-        lblOffYTitle.SetBounds(560, 102, 20, 22);
+        lblOffYTitle.SetBounds(516, 102, 18, 22);
         pTimer.Controls.Add(lblOffYTitle);
 
         nTimerOffY = new NumericUpDown();
         nTimerOffY.Minimum = -1000; nTimerOffY.Maximum = 1000;
         nTimerOffY.Value = 24;
-        nTimerOffY.SetBounds(582, 100, 64, 26);
+        nTimerOffY.SetBounds(536, 100, 54, 26);
         nTimerOffY.ValueChanged += delegate { OnTimerAppearanceEdited(true); };
         pTimer.Controls.Add(nTimerOffY);
 
         btnTimerResetPos = new Button();
         btnTimerResetPos.Text = "重置位置";
-        btnTimerResetPos.SetBounds(656, 98, 82, 28);
+        btnTimerResetPos.SetBounds(598, 98, 74, 28);
         btnTimerResetPos.Click += delegate
         {
             suppressTimerCtrl = true;
@@ -774,16 +1190,44 @@ public partial class MainForm
         };
         pTimer.Controls.Add(btnTimerResetPos);
 
+        chkTimerCard = new CheckBox();
+        chkTimerCard.Text = "胶囊背板";
+        chkTimerCard.Checked = timerUseCard;
+        chkTimerCard.SetBounds(682, 101, 82, 24);
+        chkTimerCard.CheckedChanged += delegate
+        {
+            if (suppressTimerCtrl) return;
+            timerUseCard = chkTimerCard.Checked;
+            SyncTimerOverlay(true);
+            SaveSettings();
+        };
+        pTimer.Controls.Add(chkTimerCard);
+
         pTimerDiv2 = new Panel();
         pTimerDiv2.SetBounds(8, 134, pTimer.ClientSize.Width - 16, 1);
         pTimerDiv2.BackColor = Color.FromArgb(226, 232, 240);
         pTimer.Controls.Add(pTimerDiv2);
 
+        timerTimeline = new TimelineCanvas();
+        timerTimeline.SetBounds(8, 142, Math.Max(400, pTimer.ClientSize.Width - 16), 64);
+        timerTimeline.NodeClicked += delegate(int nodeIdx)
+        {
+            if (lvTimerChain != null && nodeIdx >= 0 && nodeIdx < lvTimerChain.Items.Count)
+            {
+                lvTimerChain.SelectedItems.Clear();
+                lvTimerChain.Items[nodeIdx].Selected = true;
+                lvTimerChain.Items[nodeIdx].Focused = true;
+                lvTimerChain.EnsureVisible(nodeIdx);
+            }
+        };
+        timerTimeline.SeekRequested += SeekCountdownTo;
+        pTimer.Controls.Add(timerTimeline);
+
         lblTimerChainTitle = new Label();
-        lblTimerChainTitle.Text = "时间链事件（双击编辑，多条命中按顺序叠加 · 右键预设可复制、重命名或删除）：";
+        lblTimerChainTitle.Text = "时间链事件（双击编辑，多条命中按顺序叠加 · 右键预设可复制/重命名/删除）：";
         lblTimerChainTitle.ForeColor = Color.FromArgb(70, 90, 110);
         lblTimerChainTitle.AutoEllipsis = true;
-        lblTimerChainTitle.SetBounds(8, 145, 420, 22);
+        lblTimerChainTitle.SetBounds(8, 216, 420, 22);
         pTimer.Controls.Add(lblTimerChainTitle);
 
         btnChainAdd = new Button();
@@ -792,25 +1236,25 @@ public partial class MainForm
         btnChainAdd.ForeColor = Color.FromArgb(24, 64, 128);
         btnChainAdd.FlatStyle = FlatStyle.Flat;
         btnChainAdd.FlatAppearance.BorderColor = Color.FromArgb(170, 200, 238);
-        btnChainAdd.SetBounds(440, 141, 112, 28);
+        btnChainAdd.SetBounds(440, 212, 112, 28);
         btnChainAdd.Click += delegate { AddTimerChainNode(); };
         pTimer.Controls.Add(btnChainAdd);
 
         btnChainEdit = new Button();
         btnChainEdit.Text = "编辑…";
-        btnChainEdit.SetBounds(558, 141, 74, 28);
+        btnChainEdit.SetBounds(558, 212, 74, 28);
         btnChainEdit.Click += delegate { EditSelectedTimerChainNode(); };
         pTimer.Controls.Add(btnChainEdit);
 
         btnChainDel = new Button();
         btnChainDel.Text = "删除";
-        btnChainDel.SetBounds(638, 141, 64, 28);
+        btnChainDel.SetBounds(638, 212, 64, 28);
         btnChainDel.Click += delegate { DeleteSelectedTimerChainNode(); };
         pTimer.Controls.Add(btnChainDel);
 
         btnChainClear = new Button();
         btnChainClear.Text = "清空";
-        btnChainClear.SetBounds(708, 141, 64, 28);
+        btnChainClear.SetBounds(708, 212, 64, 28);
         btnChainClear.Click += delegate { ClearTimerChainNodes(); };
         pTimer.Controls.Add(btnChainClear);
 
@@ -824,7 +1268,15 @@ public partial class MainForm
         lvTimerChain.Columns.Add("触发时间", 196);
         lvTimerChain.Columns.Add("事件效果（变色 / 闪烁 / 文字标注）", 380);
         lvTimerChain.Columns.Add("状态", 104);
-        lvTimerChain.SetBounds(8, 175, Math.Max(400, pTimer.ClientSize.Width - 16), 200);
+        lvTimerChain.SetBounds(8, 246, Math.Max(400, pTimer.ClientSize.Width - 16), 160);
+        lvTimerChain.SelectedIndexChanged += delegate
+        {
+            if (timerTimeline != null)
+            {
+                timerTimeline.SelectedNodeIndex = lvTimerChain.SelectedIndices.Count > 0 ? lvTimerChain.SelectedIndices[0] : -1;
+                timerTimeline.Invalidate();
+            }
+        };
         lvTimerChain.DoubleClick += delegate { EditSelectedTimerChainNode(); };
         lvTimerChain.KeyDown += delegate(object snd, KeyEventArgs ke)
         {
@@ -859,11 +1311,12 @@ public partial class MainForm
         if (btnHotkey == null || btnHotkey.Parent == null) return;
         int pageW = btnHotkey.Parent.ClientSize.Width;
         if (pageW < 400) pageW = 400;
-        if (btnHotkey != null) btnHotkey.SetBounds(pageW - 8 - 104, 10, 104, 36);
-        if (bLog != null) bLog.SetBounds(pageW - 8 - 104 - 8 - 96, 10, 96, 36);
-        if (btnHotkeyOff != null) btnHotkeyOff.SetBounds(pageW - 8 - 104 - 8 - 96 - 8 - 176, 10, 176, 36);
-        if (lblPlayerBarTip != null && btnHotkeyOff != null)
-            lblPlayerBarTip.SetBounds(12, 17, Math.Max(120, btnHotkeyOff.Left - 24), 22);
+        int ty = 6;
+        if (btnHotkey != null) btnHotkey.SetBounds(pageW - 8 - 104, ty, 104, 34);
+        if (bLog != null) bLog.SetBounds(pageW - 8 - 104 - 8 - 96, ty, 96, 34);
+        if (btnHotkeyOff != null) btnHotkeyOff.SetBounds(pageW - 8 - 104 - 8 - 96 - 8 - 176, ty, 176, 34);
+        if (lblToolPageTip != null && btnHotkeyOff != null)
+            lblToolPageTip.SetBounds(12, ty + 6, Math.Max(120, btnHotkeyOff.Left - 24), 22);
     }
 
     void LayoutTimer()
@@ -871,15 +1324,6 @@ public partial class MainForm
         if (pTimerPanel == null) return;
         int W = pTimerPanel.ClientSize.Width;
         int H = pTimerPanel.ClientSize.Height;
-        try
-        {
-            if (tabs != null && pTimerPanel.Parent != null)
-            {
-                int cap = tabs.DisplayRectangle.Height - pTimerPanel.Top - 6;
-                if (cap > 200 && cap < H) H = cap;
-            }
-        }
-        catch { }
         if (W < 600) W = 600;
         if (H < 300) H = 300;
 
@@ -899,18 +1343,29 @@ public partial class MainForm
         if (pTimerDiv1 != null) pTimerDiv1.SetBounds(8, 91, W - 16, 1);
         if (pTimerDiv2 != null) pTimerDiv2.SetBounds(8, 134, W - 16, 1);
 
-        if (btnChainClear != null) btnChainClear.SetBounds(W - 72, 141, 64, 28);
-        if (btnChainDel != null) btnChainDel.SetBounds(W - 142, 141, 64, 28);
-        if (btnChainEdit != null) btnChainEdit.SetBounds(W - 222, 141, 74, 28);
-        if (btnChainAdd != null) btnChainAdd.SetBounds(W - 340, 141, 112, 28);
-        if (lblTimerChainTitle != null) lblTimerChainTitle.SetBounds(8, 145, Math.Max(180, W - 356), 22);
+        int chainBarY = 212;
+        if (timerTimeline != null)
+        {
+            timerTimeline.SetBounds(8, 142, W - 16, 64);
+        }
+        else
+        {
+            chainBarY = 141;
+        }
 
+        if (btnChainClear != null) btnChainClear.SetBounds(W - 72, chainBarY, 64, 28);
+        if (btnChainDel != null) btnChainDel.SetBounds(W - 142, chainBarY, 64, 28);
+        if (btnChainEdit != null) btnChainEdit.SetBounds(W - 222, chainBarY, 74, 28);
+        if (btnChainAdd != null) btnChainAdd.SetBounds(W - 340, chainBarY, 112, 28);
+        if (lblTimerChainTitle != null) lblTimerChainTitle.SetBounds(8, chainBarY + 4, Math.Max(180, W - 356), 22);
+
+        int lvTop = chainBarY + 34;
         int hintH = 22;
         int hintY = H - 6 - hintH;
-        int lvH = Math.Max(90, hintY - 6 - 175);
+        int lvH = Math.Max(80, hintY - 6 - lvTop);
         if (lvTimerChain != null)
         {
-            lvTimerChain.SetBounds(8, 175, W - 16, lvH);
+            lvTimerChain.SetBounds(8, lvTop, W - 16, lvH);
             if (lvTimerChain.Columns.Count == 4)
             {
                 int cw0 = 44, cw1 = 196, cw3 = 104;
@@ -929,6 +1384,32 @@ public partial class MainForm
     {
         TimerChainPreset.EvaluateTimeline(timerNodes, timerRemainSec, timerColorIdx,
             out timerActiveColorIdx, out timerActiveFlash, out timerActiveLabel);
+    }
+
+    void SeekCountdownTo(int targetSec)
+    {
+        int tot = Math.Max(1, timerTotalSec);
+        int clamped = Math.Max(0, Math.Min(tot, targetSec));
+        if (clamped == timerRemainSec) return;
+        timerRemainSec = clamped;
+        if (timerRunning)
+        {
+            if (!timerPaused)
+            {
+                DateTime now = DateTime.Now;
+                timerEndAt = now.AddSeconds(clamped);
+                timerStartedAt = now.AddSeconds(-(tot - clamped));
+            }
+            else
+            {
+                timerPausedRemainMs = clamped * 1000.0;
+                timerPausedElapsedMs = Math.Max(0L, (long)(tot - clamped) * 1000L);
+            }
+        }
+        if (clamped == 0) timerFlashDim = false;
+        EvaluateCurrentTimeline();
+        SyncTimerOverlay(false);
+        UpdateTimerUi();
     }
 
     void StartOrResetCountdown()
@@ -1028,9 +1509,12 @@ public partial class MainForm
             lastTimerOverlayLabel = lbl;
             layoutChanged = true;
         }
+        timerOverlay.TotalSeconds = Math.Max(1, timerTotalSec);
         timerOverlay.RemainingSeconds = timerRemainSec;
         timerOverlay.ActiveColorIndex = timerActiveColorIdx;
         timerOverlay.FlashDim = timerFlashDim;
+        timerOverlay.PulseAlpha = timerPulseAlpha;
+        timerOverlay.UseCardStyle = timerUseCard;
         timerOverlay.ActiveLabel = lbl;
         timerOverlay.FontSize = timerFontSize;
         timerOverlay.AnchorIndex = timerAnchorIdx;
@@ -1317,12 +1801,20 @@ public partial class MainForm
             lvTimerChain.Items[selIdx].Selected = true;
         lvTimerChain.EndUpdate();
         UpdateTimerChainRowsState();
+        if (timerTimeline != null)
+        {
+            timerTimeline.TotalSeconds = Math.Max(1, timerTotalSec);
+            timerTimeline.RemainingSeconds = timerRemainSec;
+            timerTimeline.IsRunning = timerRunning && !timerPaused;
+            timerTimeline.Nodes = timerNodes;
+            timerTimeline.Invalidate();
+        }
     }
 
     void UpdateTimerChainRowsState()
     {
         if (lvTimerChain == null) return;
-        bool activeClock = (timerRunning || timerRemainSec == 0);
+        bool activeClock = (timerRunning || timerRemainSec != timerTotalSec);
         Color rowBg = IsDark ? Color.FromArgb(13, 17, 23) : Color.White;
         Color txtNormal = IsDark ? Color.FromArgb(230, 237, 243) : Color.FromArgb(30, 41, 59);
         Color txtMuted = IsDark ? Color.FromArgb(139, 148, 158) : Color.FromArgb(110, 120, 134);
@@ -1753,6 +2245,14 @@ public partial class MainForm
             if (lblTimerState.ForeColor != sc) lblTimerState.ForeColor = sc;
         }
         UpdateTimerChainRowsState();
+        if (timerTimeline != null)
+        {
+            timerTimeline.TotalSeconds = Math.Max(1, timerTotalSec);
+            timerTimeline.RemainingSeconds = timerRemainSec;
+            timerTimeline.IsRunning = timerRunning && !timerPaused;
+            timerTimeline.Nodes = timerNodes;
+            timerTimeline.Invalidate();
+        }
     }
 
     // ---------- 配置持久化 ----------
@@ -1763,6 +2263,10 @@ public partial class MainForm
             if (string.IsNullOrEmpty(settingsPath) || !File.Exists(settingsPath)) return;
             suppressSettingsSave = true;
             suppressTimerCtrl = true;
+            closeToTrayOn = false;
+            overlay.OffsetX = 0;
+            overlay.OffsetY = 0;
+            activeCrossPresetIdx = 0;
             bool hasTimerChains = false;
             bool hasCustomChain = false;
             bool hasHotkey8 = false;
@@ -1780,7 +2284,7 @@ public partial class MainForm
                 if (k.Length > 6 && k.StartsWith("Hotkey", StringComparison.Ordinal))
                 {
                     int hi, hv;
-                    if (int.TryParse(k.Substring(6), out hi) && hi >= 1 && hi <= 8 && int.TryParse(v, out hv))
+                    if (int.TryParse(k.Substring(6), out hi) && hi >= 1 && hi <= HK_COUNT && int.TryParse(v, out hv))
                     {
                         if (hi == 8) hasHotkey8 = true;
                         int nvk = hv / 16, nmod = hv % 16;
@@ -1807,6 +2311,11 @@ public partial class MainForm
                 if (k == "TimerPresets") continue;
                 if (k == "UpdateUrl") { updateUrl = v; continue; }
                 if (k == "AutoUpdate") { autoUpdateOn = (v == "1"); continue; }
+                if (k == "CrossPresets")
+                {
+                    crossPresets = CrosshairPreset.DeserializePresets(v);
+                    continue;
+                }
                 if (k == "CrossImg")
                 {
                     crossImgToLoad = v;
@@ -1857,6 +2366,44 @@ public partial class MainForm
                 {
                     overlay.DotSize = iv;
                     if (nDot != null) nDot.Value = iv;
+                }
+                else if (k == "CrossOutline" && iv >= 0 && iv <= 2)
+                {
+                    overlay.OutlineWidth = iv;
+                    if (nCrossOutline != null) nCrossOutline.Value = iv;
+                }
+                else if (k == "CrossOpacity" && iv >= 20 && iv <= 100)
+                {
+                    overlay.OpacityPct = iv;
+                    if (nCrossOpacity != null) nCrossOpacity.Value = iv;
+                }
+                else if (k == "CrossOffsetX")
+                {
+                    overlay.OffsetX = Overlay.ClampOffset(iv);
+                    if (nCrossOffX != null) nCrossOffX.Value = overlay.OffsetX;
+                }
+                else if (k == "CrossOffsetY")
+                {
+                    overlay.OffsetY = Overlay.ClampOffset(iv);
+                    if (nCrossOffY != null) nCrossOffY.Value = overlay.OffsetY;
+                }
+                else if (k == "CrossPresetIdx" && iv >= 0)
+                {
+                    activeCrossPresetIdx = iv;
+                }
+                else if (k == "CloseToTray")
+                {
+                    closeToTrayOn = (iv != 0);
+                    if (chkCloseToTray != null) chkCloseToTray.Checked = closeToTrayOn;
+                }
+                else if (k == "TimerUseCard")
+                {
+                    timerUseCard = (iv != 0);
+                    if (chkTimerCard != null) chkTimerCard.Checked = timerUseCard;
+                }
+                else if (k == "NavCollapsed")
+                {
+                    navRailCollapsed = (iv != 0);
                 }
                 else if (k == "TimerPresetIdx")
                 {
@@ -1920,6 +2467,7 @@ public partial class MainForm
                     if (iv == 0) rbTapMode.Checked = true;
                     else if (iv == 2) rbPollMode.Checked = true;
                     else rbOneIp.Checked = true;
+                    if (segJoinMode != null) segJoinMode.SetSelectedSilent(iv);
                     suppressModeEvent = false;
                 }
             }
@@ -1959,8 +2507,18 @@ public partial class MainForm
             SyncTimerOverlay(true);
             UpdateTimerButtonsStyle();
             UpdateTimerUi();
+            if (crossPresets == null || crossPresets.Count == 0)
+                crossPresets = CrosshairPreset.CreateDefaultPresets();
+            if (activeCrossPresetIdx < 0 || activeCrossPresetIdx >= crossPresets.Count)
+                activeCrossPresetIdx = 0;
+            if (nCrossOffX != null) nCrossOffX.Value = Overlay.ClampOffset(overlay.OffsetX);
+            if (nCrossOffY != null) nCrossOffY.Value = Overlay.ClampOffset(overlay.OffsetY);
+            if (chkCloseToTray != null) chkCloseToTray.Checked = closeToTrayOn;
+            UpdateTrayIconVisibility();
+            SyncCrossPresetUiState();
             overlay.Invalidate();
             if (crossPreview != null) crossPreview.Invalidate();
+            SyncSettingsPageUi();
         }
         catch (Exception ex) { Native.Log("settings load: " + ex.Message); }
         finally { suppressTimerCtrl = false; suppressSettingsSave = false; }
@@ -1993,11 +2551,18 @@ public partial class MainForm
             sb.Append("Length=").Append(overlay.Length).Append("\r\n");
             sb.Append("Gap=").Append(overlay.Gap).Append("\r\n");
             sb.Append("DotSize=").Append(overlay.DotSize).Append("\r\n");
+            sb.Append("CrossOutline=").Append(overlay.OutlineWidth).Append("\r\n");
+            sb.Append("CrossOpacity=").Append(overlay.OpacityPct).Append("\r\n");
+            sb.Append("CrossOffsetX=").Append(Overlay.ClampOffset(overlay.OffsetX)).Append("\r\n");
+            sb.Append("CrossOffsetY=").Append(Overlay.ClampOffset(overlay.OffsetY)).Append("\r\n");
+            sb.Append("CrossPresetIdx=").Append(activeCrossPresetIdx).Append("\r\n");
+            sb.Append("CrossPresets=").Append(CrosshairPreset.SerializePresets(crossPresets)).Append("\r\n");
+            sb.Append("CloseToTray=").Append(closeToTrayOn ? 1 : 0).Append("\r\n");
             if (cmbSpeed != null) sb.Append("SpeedIndex=").Append(cmbSpeed.SelectedIndex).Append("\r\n");
             if (chkOcr != null) sb.Append("OcrOn=").Append(chkOcr.Checked ? 1 : 0).Append("\r\n");
             if (overlay != null && !string.IsNullOrEmpty(overlay.CustomImagePath))
                 sb.Append("CrossImg=").Append(overlay.CustomImagePath).Append("\r\n");
-            for (int hi = 0; hi < 8; hi++)
+            for (int hi = 0; hi < HK_COUNT; hi++)
                 sb.Append("Hotkey").Append(hi + 1).Append("=").Append(hkVk[hi] * 16 + hkMod[hi]).Append("\r\n");
             sb.Append("TimerPresetIdx=").Append(activePresetIdx).Append("\r\n");
             sb.Append("TimerLastMode=").Append(lastAddedTriggerMode).Append("\r\n");
@@ -2007,10 +2572,12 @@ public partial class MainForm
             sb.Append("TimerAnchor=").Append(timerAnchorIdx).Append("\r\n");
             sb.Append("TimerOffX=").Append(timerOffX).Append("\r\n");
             sb.Append("TimerOffY=").Append(timerOffY).Append("\r\n");
+            sb.Append("TimerUseCard=").Append(timerUseCard ? 1 : 0).Append("\r\n");
             sb.Append("TimerChains=").Append(TimerChainPreset.SerializePresets(timerPresets)).Append("\r\n");
             sb.Append("TimerCustomChain=").Append(TimerChainPreset.SerializeNodes(timerNodes)).Append("\r\n");
             sb.Append("JMode=").Append(JoinModeIdx).Append("\r\n");
             sb.Append("AutoUpdate=").Append(autoUpdateOn ? 1 : 0).Append("\r\n");
+            sb.Append("NavCollapsed=").Append(navRailCollapsed ? 1 : 0).Append("\r\n");
             sb.Append("ThemeMode=").Append(themeMode).Append("\r\n");
             if (!string.IsNullOrEmpty(updateUrl)) sb.Append("UpdateUrl=").Append(updateUrl).Append("\r\n");
             // 收藏轮询的勾选偏好；一个都没勾也要写（表示"用户就是要全不选"）
@@ -2025,7 +2592,7 @@ public partial class MainForm
             sb.Append("\r\n");
             AtomicWriteText(settingsPath, sb.ToString());
         }
-        catch { }
+        catch (Exception ex) { Native.LogWarn("SaveSettings", ex); }
     }
 
     // ---------- 收藏夹 ----------
@@ -2084,6 +2651,7 @@ public partial class MainForm
         }
         if (btnCheckAll != null) btnCheckAll.Visible = poll;
         if (btnUncheckAll != null) btnUncheckAll.Visible = poll;
+        if (btnSyncSrv != null) btnSyncSrv.Visible = !tap;
         if (btnRefreshFav != null) btnRefreshFav.Visible = !tap;
         if (lblTapGuide != null) lblTapGuide.Visible = tap;
 
@@ -2488,15 +3056,14 @@ public partial class MainForm
 
         if (wasTyping)
         {
-            if (savedLayout != IntPtr.Zero)
+            if (savedLayout != IntPtr.Zero || savedTempLayout != IntPtr.Zero)
             {
                 IntPtr gameBack = Native.FindGameWindow();
-                if (gameBack != IntPtr.Zero)
-                {
-                    Native.RestoreLayout(gameBack, savedLayout);
+                Native.RestoreLayout(gameBack, savedLayout, savedTempLayout);
+                if (gameBack != IntPtr.Zero && savedLayout != IntPtr.Zero)
                     Native.Log("ime: restored");
-                }
                 savedLayout = IntPtr.Zero;
+                savedTempLayout = IntPtr.Zero;
             }
             RestoreClipboardAfterStop();
         }
@@ -2530,6 +3097,7 @@ public partial class MainForm
             {
                 try { Clipboard.Clear(); Native.Log("clipboard: cleared connect residue"); } catch { }
             }
+            savedClipboardText = null;
         }
         catch (Exception ex) { Native.Log("clipboard restore EX: " + ex.Message); }
     }
@@ -2561,6 +3129,7 @@ public partial class MainForm
 
         if (!BuildTargets(m, false)) return;
 
+        savedClipboardText = null;
         try
         {
             if (Clipboard.ContainsText())
@@ -2590,7 +3159,7 @@ public partial class MainForm
                 }
                 catch { }
             }
-            savedLayout = Native.SwitchToEnglish(gw);
+            savedLayout = Native.SwitchToEnglish(gw, out savedTempLayout);
             Native.Log("ime: switched to english, old=" + savedLayout.ToInt64());
         }
         else
@@ -2623,78 +3192,154 @@ public partial class MainForm
         }
     }
 
-    // ===== Windows 自带 OCR（后台非阻塞 + 引擎缓存 + 严格释放）=====
+    // ===== Windows 自带 OCR（后台非阻塞 + 引擎缓存 + 无竞态 TaskCompletionSource 等待 + 零 PNG 直传）=====
     static T WaitOp<T>(Windows.Foundation.IAsyncOperation<T> op, int timeoutMs)
     {
         if (op == null) return default(T);
-        using (var done = new ManualResetEventSlim(false))
+        var tcs = new TaskCompletionSource<T>();
+        op.Completed = delegate(Windows.Foundation.IAsyncOperation<T> o, Windows.Foundation.AsyncStatus s)
         {
-            T result = default(T);
-            op.Completed = delegate(Windows.Foundation.IAsyncOperation<T> o, Windows.Foundation.AsyncStatus s)
+            try
             {
-                try
+                if (s == Windows.Foundation.AsyncStatus.Completed)
                 {
-                    if (s == Windows.Foundation.AsyncStatus.Completed)
-                        result = o.GetResults();
+                    T r = o.GetResults();
+                    if (!tcs.TrySetResult(r))
+                    {
+                        var disp = r as IDisposable;
+                        if (disp != null) { try { disp.Dispose(); } catch { } }
+                    }
                 }
-                catch { }
-                finally
+                else
                 {
-                    try { done.Set(); } catch { }
+                    tcs.TrySetResult(default(T));
                 }
-            };
-            if (!done.Wait(timeoutMs))
-            {
-                try { op.Cancel(); } catch { }
             }
-            return result;
+            catch (Exception ex)
+            {
+                Native.LogWarn("WaitOp", ex);
+                tcs.TrySetResult(default(T));
+            }
+        };
+        try
+        {
+            if (!tcs.Task.Wait(timeoutMs))
+            {
+                tcs.TrySetCanceled();
+                try { op.Cancel(); } catch { }
+                return default(T);
+            }
+            return tcs.Task.Result;
+        }
+        catch (Exception ex)
+        {
+            Native.LogWarn("WaitOpWait", ex);
+            return default(T);
+        }
+    }
+
+    // 位图 → WinRT SoftwareBitmap（LockBits + IMemoryBufferByteAccess 零 PNG、零托管数组直接写入原生缓冲区）
+    internal static SoftwareBitmap CreateSoftwareBitmapFromBitmap(Bitmap bmp, int scale)
+    {
+        if (bmp == null) return null;
+        int w = bmp.Width;
+        int h = bmp.Height;
+        if (w <= 0 || h <= 0) return null;
+
+        Bitmap scaledOwned = null;
+        Bitmap target = bmp;
+        try
+        {
+            int nw = w, nh = h;
+            if (scale > 1)
+            {
+                nw = Math.Max(1, w * scale);
+                nh = Math.Max(1, h * nw / w);
+                scaledOwned = new Bitmap(nw, nh, PixelFormat.Format32bppArgb);
+                using (var g = Graphics.FromImage(scaledOwned))
+                {
+                    g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBilinear;
+                    g.DrawImage(bmp, 0, 0, nw, nh);
+                }
+                target = scaledOwned;
+            }
+
+            SoftwareBitmap sb = new SoftwareBitmap(BitmapPixelFormat.Bgra8, nw, nh, BitmapAlphaMode.Ignore);
+            try
+            {
+                using (BitmapBuffer buffer = sb.LockBuffer(BitmapBufferAccessMode.Write))
+                using (Windows.Foundation.IMemoryBufferReference memRef = buffer.CreateReference())
+                {
+                    BitmapPlaneDescription desc = buffer.GetPlaneDescription(0);
+                    IntPtr dstPtr;
+                    uint cap;
+                    ((IMemoryBufferByteAccess)memRef).GetBuffer(out dstPtr, out cap);
+
+                    int rowBytes = nw * 4;
+                    if (dstPtr == IntPtr.Zero || desc.StartIndex < 0 || desc.Stride < rowBytes
+                        || (long)desc.StartIndex + (long)(nh - 1) * desc.Stride + rowBytes > (long)cap)
+                    {
+                        throw new InvalidOperationException("SoftwareBitmap buffer out of range");
+                    }
+
+                    var rect = new Rectangle(0, 0, nw, nh);
+                    BitmapData bd = target.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format32bppArgb);
+                    try
+                    {
+                        if (bd.Stride == rowBytes && desc.Stride == rowBytes && desc.StartIndex == 0)
+                        {
+                            Native.CopyMemory(dstPtr, bd.Scan0, new UIntPtr((ulong)((long)rowBytes * nh)));
+                        }
+                        else
+                        {
+                            for (int y = 0; y < nh; y++)
+                            {
+                                IntPtr srcRow = new IntPtr(bd.Scan0.ToInt64() + (long)y * bd.Stride);
+                                IntPtr dstRow = new IntPtr(dstPtr.ToInt64() + desc.StartIndex + (long)y * desc.Stride);
+                                Native.CopyMemory(dstRow, srcRow, new UIntPtr((ulong)rowBytes));
+                            }
+                        }
+                    }
+                    finally
+                    {
+                        target.UnlockBits(bd);
+                    }
+                }
+                return sb;
+            }
+            catch
+            {
+                try { sb.Dispose(); } catch { }
+                throw;
+            }
+        }
+        finally
+        {
+            if (scaledOwned != null) { try { scaledOwned.Dispose(); } catch { } }
         }
     }
 
     // 位图 → OCR 文本（scale>1 时放大，小字更易识别）
     string OcrBitmapText(Bitmap bmp, int scale)
     {
+        if (bmp == null) return null;
         if (!ocrEngineInitTried)
         {
             ocrEngineInitTried = true;
             try { cachedOcrEngine = OcrEngine.TryCreateFromUserProfileLanguages(); }
-            catch { cachedOcrEngine = null; }
+            catch (Exception ex) { cachedOcrEngine = null; Native.LogWarn("OcrInit", ex); }
         }
         if (cachedOcrEngine == null) return null;
 
-        byte[] png;
-        int w = bmp.Width;
-        int nw = Math.Max(1, w * Math.Max(1, scale));
-        int nh = Math.Max(1, bmp.Height * nw / w);
-        using (var scaled = new Bitmap(bmp, nw, nh))
-        using (var ms = new MemoryStream())
+        using (var sb = CreateSoftwareBitmapFromBitmap(bmp, scale))
         {
-            scaled.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
-            png = ms.ToArray();
-        }
+            if (sb == null) return null;
+            var res = WaitOp(cachedOcrEngine.RecognizeAsync(sb), 3000);
+            if (res == null) return null;
 
-        using (var ras = new InMemoryRandomAccessStream())
-        {
-            using (var writer = new DataWriter(ras))
-            {
-                writer.WriteBytes(png);
-                WaitOp(writer.StoreAsync(), 2500);
-                try { writer.DetachStream(); } catch { }
-            }
-            ras.Seek(0);
-
-            var decoder = WaitOp(BitmapDecoder.CreateAsync(ras), 2500);
-            if (decoder == null) return null;
-            using (var sb = WaitOp(decoder.GetSoftwareBitmapAsync(), 2500))
-            {
-                if (sb == null) return null;
-                var res = WaitOp(cachedOcrEngine.RecognizeAsync(sb), 3000);
-                if (res == null) return null;
-
-                var sbText = new StringBuilder();
-                foreach (var line in res.Lines) { sbText.Append(line.Text); sbText.Append('\n'); }
-                return sbText.ToString();
-            }
+            var sbText = new StringBuilder();
+            foreach (var line in res.Lines) { sbText.Append(line.Text); sbText.Append('\n'); }
+            return sbText.ToString();
         }
     }
 
@@ -2746,7 +3391,7 @@ public partial class MainForm
                 return OcrBitmapText(bmp, 3);
             }
         }
-        catch { return null; }
+        catch (Exception ex) { Native.LogWarn("OcrLoadingBand", ex); return null; }
     }
 
     string lastOcrRaw = "";          // 最近一次 OCR 原文（RX_OCR_DUMP=1 时写日志）
@@ -2838,7 +3483,7 @@ public partial class MainForm
         {
             string scene = "fail";
             try { scene = OcrScene(); }
-            catch { scene = "fail"; }
+            catch (Exception ex) { Native.LogWarn("OcrScene", ex); scene = "fail"; }
             finally { Interlocked.Exchange(ref ocrBusy, 0); }
 
             SafeBeginInvoke(delegate

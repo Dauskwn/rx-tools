@@ -53,12 +53,23 @@ public partial class MainForm
         catch (Exception ex) { Native.Log("custom load: " + ex.Message); }
     }
 
-    static string CleanCtrl(string s, bool singleLine)
+    internal static string CleanCtrl(string s, bool singleLine)
     {
         if (string.IsNullOrEmpty(s)) return "";
-        string res = s.Replace('\u0001', ' ').Replace('\u0002', ' ');
-        if (singleLine) res = res.Replace('\r', ' ').Replace('\n', ' ');
-        return res;
+        var sb = new StringBuilder(s.Length);
+        for (int i = 0; i < s.Length; i++)
+        {
+            char c = s[i];
+            if (c == '\u0001' || c == '\u0002' || c == '\u0003' || c == '\u0004') { sb.Append(' '); continue; }
+            if (c < ' ')
+            {
+                if (!singleLine && (c == '\r' || c == '\n' || c == '\t')) sb.Append(c);
+                else sb.Append(' ');
+                continue;
+            }
+            sb.Append(c);
+        }
+        return sb.ToString();
     }
 
     static bool AtomicWriteText(string path, string content)
@@ -128,31 +139,35 @@ public partial class MainForm
 
     void RebuildCustomPage()
     {
-        if (tabs == null || customPage == null) return;
         try
         {
-            int idx = tabs.TabPages.IndexOf(customPage);
-            if (idx < 0) return;
-            int prevSel = tabs.SelectedIndex;
-            tabs.TabPages.Remove(customPage);
-            ForgetOrigColors(customPage);
-            customPage.Dispose();
+            bool wasActive = (activeNavKey == "custom");
+            Control old;
+            if (navPages.TryGetValue("custom", out old) && old != null)
+            {
+                if (old.Parent != null) old.Parent.Controls.Remove(old);
+                ForgetOrigColors(old);
+                old.Dispose();
+            }
             customPage = BuildCustomPage();
-            tabs.TabPages.Insert(idx, customPage);
+            string navGroup = "文本工具";
+            RegisterNavPage("custom", "自定义文案", navGroup, NavIconKind.Bookmark, cTitles.Length, customPage);
             ThemeControlTree(customPage);
-            if (prevSel >= 0 && prevSel < tabs.TabPages.Count) tabs.SelectedIndex = prevSel;
+            if (wasActive) SwitchNavPage("custom");
+            UpdateNavBadges();
         }
         catch (Exception ex) { Native.Log("rebuild custom page fail: " + ex.Message); }
     }
 
-    TabPage BuildCustomPage()
+    Panel BuildCustomPage()
     {
         Font ui = TrackFont("Microsoft YaHei UI", 9.5f, FontStyle.Regular);
         Font mono = TrackFont("Consolas", 10f, FontStyle.Regular);
         Font btnBold = TrackFont("Microsoft YaHei UI", 10f, FontStyle.Bold);
         Font cardFont = TrackFont("Microsoft YaHei UI", 10.5f, FontStyle.Bold);
 
-        var page = new TabPage("自定义");
+        var page = new Panel();
+        page.Text = "自定义";
         page.Padding = new Padding(0);
         page.BackColor = Color.White;
 
@@ -174,28 +189,27 @@ public partial class MainForm
         pCards.Controls.Add(bEdit);
 
         var tip = new Label();
-        tip.Text = "左键单击卡片 = 复制全文，右键卡片 = 快捷编辑/删除　·　上方预览框可划选复制局部片段";
+        tip.Text = "左键单击卡片 = 复制（支持 {target} 联动顶部目标） · 右键可编辑 / 以 ; 串联复制多行连招";
         tip.ForeColor = Color.DimGray;
-        tip.SetBounds(160, 12, 520, 22);
+        tip.AutoEllipsis = true;
+        tip.SetBounds(160, 12, 460, 22);
         pCards.Controls.Add(tip);
 
         var lblCardFilter = new Label();
         lblCardFilter.Text = "筛选：";
         lblCardFilter.ForeColor = Color.Gray;
-        lblCardFilter.SetBounds(686, 12, 44, 22);
-        lblCardFilter.Anchor = AnchorStyles.Top;
+        lblCardFilter.SetBounds(640, 12, 44, 22);
         pCards.Controls.Add(lblCardFilter);
 
         var txtCardFilter = new TextBox();
         txtCardFilter.Font = ui;
-        txtCardFilter.SetBounds(730, 8, 140, 26);
-        txtCardFilter.Anchor = AnchorStyles.Top;
-        // 靠右的位置在 Resize 里算，避免 Anchor 在面板还没尺寸时算出屏幕外的坐标
+        txtCardFilter.SetBounds(686, 8, 160, 26);
         pCards.Resize += delegate
         {
             int right = pCards.ClientSize.Width - 10;
-            txtCardFilter.Left = Math.Max(730, right - txtCardFilter.Width);
+            txtCardFilter.Left = Math.Max(420, right - txtCardFilter.Width);
             lblCardFilter.Left = txtCardFilter.Left - 44;
+            tip.Width = Math.Max(120, lblCardFilter.Left - tip.Left - 10);
         };
         pCards.Controls.Add(txtCardFilter);
 
@@ -318,19 +332,44 @@ public partial class MainForm
         int currentEditIdx = -1;
         bool suppressLoad = false;
 
-        Action commitPendingEdit = delegate
+        Action<int, bool> saveEditAt = delegate(int idx, bool syncTitleBox)
         {
-            if (currentEditIdx >= 0 && currentEditIdx < cTitles.Length)
+            if (idx < 0 || idx >= cTitles.Length) return;
+            string newTitle = tTitle.Text.Trim();
+            string newText = tText.Text;
+            if (newTitle.Length == 0)
             {
-                string newTitle = tTitle.Text.Trim();
-                string newText = tText.Text;
-                if (newTitle.Length > 0 && (cTitles[currentEditIdx] != newTitle || cTexts[currentEditIdx] != newText))
+                if (cTexts[idx] != newText)
                 {
-                    cTitles[currentEditIdx] = newTitle;
-                    cTexts[currentEditIdx] = newText;
+                    cTexts[idx] = newText;
                     SaveCustom();
+                    toast.ShowText("名称不能为空，已保留原名称并保存正文");
+                }
+                if (syncTitleBox)
+                {
+                    suppressLoad = true;
+                    tTitle.Text = cTitles[idx];
+                    suppressLoad = false;
+                }
+                return;
+            }
+            if (cTitles[idx] != newTitle || cTexts[idx] != newText)
+            {
+                cTitles[idx] = newTitle;
+                cTexts[idx] = newText;
+                SaveCustom();
+                if (idx < list.Items.Count)
+                {
+                    suppressLoad = true;
+                    list.Items[idx] = newTitle;
+                    suppressLoad = false;
                 }
             }
+        };
+
+        Action commitPendingEdit = delegate
+        {
+            saveEditAt(currentEditIdx, true);
         };
 
         Action<int> loadInto = delegate(int i)
@@ -373,6 +412,12 @@ public partial class MainForm
             ClearAndDisposeControls(flow);
             string q = txtCardFilter.Text.Trim();
             int shownCards = 0;
+            Color[] stripePalette = new Color[]
+            {
+                Color.FromArgb(37, 99, 235), Color.FromArgb(16, 185, 129),
+                Color.FromArgb(139, 92, 246), Color.FromArgb(245, 158, 11),
+                Color.FromArgb(236, 72, 153), Color.FromArgb(14, 165, 233)
+            };
             for (int i = 0; i < cTitles.Length; i++)
             {
                 if (q.Length > 0)
@@ -383,36 +428,56 @@ public partial class MainForm
                 }
                 shownCards++;
                 int idx = i;
-                var b = new Button();
-                b.Tag = "rx-card";
-                b.Text = cTitles[i];
-                b.Font = cardFont;
-                b.Size = new Size(268, 68);
-                b.Margin = new Padding(4, 4, 8, 8);
-                b.TextAlign = ContentAlignment.MiddleCenter;
-                b.BackColor = Color.FromArgb(238, 244, 252);
-                b.ForeColor = Color.FromArgb(24, 34, 48);
-                b.FlatStyle = FlatStyle.Flat;
-                b.FlatAppearance.BorderColor = Color.FromArgb(160, 190, 225);
-                b.Cursor = Cursors.Hand;
-                b.MouseEnter += delegate { b.BackColor = IsDark ? Color.FromArgb(36, 45, 58) : Color.FromArgb(224, 236, 252); };
-                b.MouseLeave += delegate { b.BackColor = IsDark ? Color.FromArgb(28, 35, 46) : Color.FromArgb(238, 244, 252); };
-                string tipText = cTexts[idx];
+                string rawBody = cTexts[idx] ?? "";
+                bool hasDyn = rawBody.IndexOf("{target}", StringComparison.Ordinal) >= 0 || rawBody.IndexOf('^') >= 0;
+                bool multiLn = rawBody.IndexOf('\n') >= 0;
+
+                var card = new CustomPhraseCard();
+                card.TitleText = cTitles[idx];
+                card.BodyText = rawBody;
+                card.StripeColor = stripePalette[idx % stripePalette.Length];
+                card.HasTargetPlaceholder = hasDyn;
+                card.IsMultiLine = multiLn;
+                string tipText = rawBody;
                 if (tipText.Length > 600) tipText = tipText.Substring(0, 600) + " …";
-                hover.SetToolTip(b, string.IsNullOrEmpty(tipText) ? "（空）左键复制 / 右键管理" : tipText + Environment.NewLine + "（左键单击复制，右键编辑或删除）");
-                b.Click += delegate
+                hover.SetToolTip(card, string.IsNullOrEmpty(tipText) ? "（空）左键复制 / 右键管理" : tipText + Environment.NewLine + "（左键单击复制，右键编辑/串联复制/删除）");
+                card.Click += delegate
                 {
-                    preview.Text = cTexts[idx];
+                    string resolved = cTexts[idx];
+                    preview.Text = resolved;
                     preview.Select(0, 0);
-                    CopyToClipboard(cTitles[idx], cTexts[idx]);
+                    CopyToClipboard(cTitles[idx], resolved);
                 };
-                b.MouseUp += delegate(object s, MouseEventArgs e)
+                card.CardRightClick += delegate(object s, MouseEventArgs e)
                 {
-                    if (e.Button != MouseButtons.Right) return;
                     var menu = new ContextMenuStrip();
                     menu.Closed += delegate { SafeBeginInvoke(delegate { menu.Dispose(); }); };
+                    string resolved = cTexts[idx];
                     var mCopy = new ToolStripMenuItem("复制内容：" + Shorten(cTitles[idx]));
-                    mCopy.Click += delegate { CopyToClipboard(cTitles[idx], cTexts[idx]); };
+                    mCopy.Click += delegate
+                    {
+                        CopyToClipboard(cTitles[idx], resolved);
+                    };
+                    menu.Items.Add(mCopy);
+
+                    if (resolved.IndexOf('\n') >= 0)
+                    {
+                        var mChain = new ToolStripMenuItem("以 ; 串联复制（控制台连招）");
+                        mChain.Click += delegate
+                        {
+                            string[] lns = resolved.Replace("\r\n", "\n").Replace("\r", "\n").Split('\n');
+                            var nonEmpty = new List<string>();
+                            for (int li = 0; li < lns.Length; li++)
+                            {
+                                string tr = lns[li].Trim();
+                                if (tr.Length > 0) nonEmpty.Add(tr);
+                            }
+                            string joined = string.Join("; ", nonEmpty.ToArray());
+                            CopyToClipboard(cTitles[idx] + " (串联)", joined);
+                        };
+                        menu.Items.Add(mChain);
+                    }
+
                     var mEdit = new ToolStripMenuItem("编辑此条目");
                     mEdit.Click += delegate
                     {
@@ -436,15 +501,15 @@ public partial class MainForm
                         cTitles = nt; cTexts = nx;
                         SaveCustom();
                         rebuildCards();
+                        UpdateNavBadges();
                         toast.ShowText("已删除条目");
                     };
-                    menu.Items.Add(mCopy);
                     menu.Items.Add(mEdit);
                     menu.Items.Add(new ToolStripSeparator());
                     menu.Items.Add(mDel);
-                    menu.Show(b, e.Location);
+                    menu.Show(card, e.Location);
                 };
-                flow.Controls.Add(b);
+                flow.Controls.Add(card);
             }
 
             if (cTitles.Length == 0)
@@ -482,19 +547,8 @@ public partial class MainForm
         list.SelectedIndexChanged += delegate
         {
             if (suppressLoad) return;
-            if (currentEditIdx >= 0 && currentEditIdx < cTitles.Length && currentEditIdx != list.SelectedIndex)
-            {
-                string editedTitle = tTitle.Text.Trim();
-                if (editedTitle.Length > 0 && (cTitles[currentEditIdx] != editedTitle || cTexts[currentEditIdx] != tText.Text))
-                {
-                    cTitles[currentEditIdx] = editedTitle;
-                    cTexts[currentEditIdx] = tText.Text;
-                    SaveCustom();
-                    suppressLoad = true;
-                    list.Items[currentEditIdx] = editedTitle;
-                    suppressLoad = false;
-                }
-            }
+            if (currentEditIdx >= 0 && currentEditIdx != list.SelectedIndex)
+                saveEditAt(currentEditIdx, false);
             loadInto(list.SelectedIndex);
         };
 
@@ -513,6 +567,7 @@ public partial class MainForm
             list.SelectedIndex = list.Items.Count - 1;
             tTitle.Focus();
             tTitle.SelectAll();
+            UpdateNavBadges();
         };
 
         bDel.Click += delegate
@@ -532,6 +587,7 @@ public partial class MainForm
             rebuildList();
             if (list.Items.Count > 0)
                 list.SelectedIndex = Math.Min(i, list.Items.Count - 1);
+            UpdateNavBadges();
         };
 
         Action<int> move = delegate(int dir)
@@ -599,6 +655,7 @@ public partial class MainForm
             pEdit.Visible = false;
             pCards.Visible = true;
             rebuildCards();
+            UpdateNavBadges();
         };
 
         if (cTitles.Length == 0)
