@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -42,6 +42,87 @@ jobs:
           name: RXToolbox-unsigned
           path: dist/*.exe
           if-no-files-found: error
+
+      - name: Package release assets & extract notes
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Add-Type -AssemblyName System.IO.Compression
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+          $tag = $env:GITHUB_REF_NAME
+          $ver = $tag.TrimStart('v')
+          $vUpper = "V$ver"
+
+          New-Item -ItemType Directory -Path release-assets -Force | Out-Null
+          $exeOut = (Resolve-Path '.').Path + "\release-assets\RXToolbox.exe"
+          $zipOut = (Resolve-Path '.').Path + "\release-assets\RXToolbox-$vUpper.zip"
+          Copy-Item dist\Rx工具箱.exe $exeOut -Force
+
+          $zip = [System.IO.Compression.ZipFile]::Open($zipOut, [System.IO.Compression.ZipArchiveMode]::Create, [System.Text.Encoding]::UTF8)
+          try {
+            [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, (Resolve-Path 'dist\Rx工具箱.exe').Path, 'Rx工具箱.exe', [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null
+            [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, (Resolve-Path 'docs\使用说明.txt').Path, '使用说明.txt', [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null
+            [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, (Resolve-Path 'LICENSE').Path, 'LICENSE', [System.IO.Compression.CompressionLevel]::Optimal) | Out-Null
+            $srvEntry = $zip.CreateEntry('servers.txt', [System.IO.Compression.CompressionLevel]::Optimal)
+            $srvStream = $srvEntry.Open()
+            $srvStream.Dispose()
+          }
+          finally {
+            $zip.Dispose()
+          }
+
+          $exeItem = Get-Item $exeOut
+          $zipItem = Get-Item $zipOut
+          $exeSha = (Get-FileHash $exeOut -Algorithm SHA256).Hash.ToLowerInvariant()
+          $zipSha = (Get-FileHash $zipOut -Algorithm SHA256).Hash.ToLowerInvariant()
+
+          $changelog = [System.IO.File]::ReadAllText((Resolve-Path 'CHANGELOG.md').Path, [System.Text.Encoding]::UTF8)
+          $pat = '(?ms)^##\s+' + [regex]::Escape($ver) + '(?=\b|（|\(|$)[^\r\n]*\r?\n(.*?)(?=\r?\n---\s*(?:\r?\n|$)|\r?\n##\s+|\z)'
+          $m = [regex]::Match($changelog, $pat)
+          $notesBody = if ($m.Success) { $m.Groups[1].Value.Trim() } else { '- 详见仓库 CHANGELOG.md' }
+
+          $nl = "`n"
+          $releaseBody = @(
+            "## RX 工具箱 $vUpper（纯玩家开源绿色版）"
+            ""
+            $notesBody
+            ""
+            "### 下载校验（SHA256）"
+            ("- ``RXToolbox-$vUpper.zip``（{0:N0} 字节）：``{1}``" -f $zipItem.Length, $zipSha)
+            ("- ``RXToolbox.exe``（{0:N0} 字节）：``{1}``" -f $exeItem.Length, $exeSha)
+          ) -join $nl
+          [System.IO.File]::WriteAllText(((Resolve-Path '.').Path + '\release-notes.md'), $releaseBody, [System.Text.UTF8Encoding]::new($false))
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = $env:GITHUB_REF_NAME
+          $ver = $tag.TrimStart('v')
+          $vUpper = "V$ver"
+          $zip = "release-assets/RXToolbox-$vUpper.zip"
+          $exe = "release-assets/RXToolbox.exe"
+
+          $prevEap = $ErrorActionPreference
+          $ErrorActionPreference = 'Continue'
+          gh release view $tag *> $null
+          $exists = ($LASTEXITCODE -eq 0)
+          $ErrorActionPreference = $prevEap
+          if ($exists) {
+            gh release upload $tag $zip $exe --clobber
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            gh release edit $tag --draft=false --latest --title "RXToolbox $vUpper" --notes-file release-notes.md
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          else {
+            gh release create $tag $zip $exe --title "RXToolbox $vUpper" --notes-file release-notes.md --latest
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
 
       # ------------------------------------------------------------------
       # 拿到 SignPath 的 organization-id / project-slug 后，把下面这段启用：
